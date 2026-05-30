@@ -1,16 +1,18 @@
 import { View, type ViewProps } from 'react-native';
 
-import { ThemeColor } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+export type ThemedSurface = 'background' | 'surface' | 'surface-2';
 
 export type ThemedViewProps = ViewProps & {
-  lightColor?: string;
-  darkColor?: string;
-  type?: ThemeColor;
+  /** Semantic background that adapts to light/dark automatically. */
+  surface?: ThemedSurface;
 };
 
-export function ThemedView({ style, lightColor, darkColor, type, ...otherProps }: ThemedViewProps) {
-  const theme = useTheme();
+const surfaceClass: Record<ThemedSurface, string> = {
+  background: 'bg-background',
+  surface: 'bg-surface',
+  'surface-2': 'bg-surface-2',
+};
 
-  return <View style={[{ backgroundColor: theme[type ?? 'background'] }, style]} {...otherProps} />;
+export function ThemedView({ surface = 'background', className, ...rest }: ThemedViewProps) {
+  return <View className={`${surfaceClass[surface]} ${className ?? ''}`} {...rest} />;
 }
