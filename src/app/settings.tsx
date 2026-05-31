@@ -1,18 +1,18 @@
-import { useRouter } from 'expo-router';
-import { Pressable, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from "expo-router";
+import { Pressable, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 
-import { Icon, type IconName } from '@/components/icon';
-import { SortOptionsList } from '@/components/sort-options-list';
-import { ThemedText } from '@/components/themed-text';
-import { useTheme } from '@/hooks/use-theme';
-import { useSort } from '@/providers/sort-provider';
-import type { ThemePreference } from '@/providers/theme-provider';
+import { Icon, type IconName } from "@/components/icon";
+import { SortOptionsList } from "@/components/sort-options-list";
+import { ThemedText } from "@/components/themed-text";
+import { useTheme } from "@/hooks/use-theme";
+import { useSort } from "@/providers/sort-provider";
+import type { ThemePreference } from "@/providers/theme-provider";
 
 const OPTIONS: { value: ThemePreference; label: string; icon: IconName }[] = [
-  { value: 'system', label: 'System', icon: 'settings' },
-  { value: 'light', label: 'Light', icon: 'light' },
-  { value: 'dark', label: 'Dark', icon: 'dark' },
+  { value: "system", label: "System", icon: "settings" },
+  { value: "light", label: "Light", icon: "light" },
+  { value: "dark", label: "Dark", icon: "dark" },
 ];
 
 export default function SettingsScreen() {
@@ -21,10 +21,14 @@ export default function SettingsScreen() {
   const { sort, setSort } = useSort();
 
   return (
-    <SafeAreaView className="flex-1 bg-background" edges={['top']}>
+    <SafeAreaView className="flex-1 bg-background" edges={["top"]}>
       {/* Custom header with back button */}
       <View className="flex-row items-center gap-2 px-2 py-1">
-        <Pressable onPress={() => router.back()} hitSlop={10} className="p-2 active:opacity-70">
+        <Pressable
+          onPress={() => router.back()}
+          hitSlop={10}
+          className="p-2 active:opacity-70"
+        >
           <Icon name="back" size={22} color={colors.text} />
         </Pressable>
         <ThemedText type="subtitle" className="flex-1">
@@ -44,16 +48,18 @@ export default function SettingsScreen() {
                 key={option.value}
                 onPress={() => setPreference(option.value)}
                 className={`flex-1 items-center gap-1.5 rounded-xl py-3 active:opacity-80 ${
-                  active ? 'bg-accent' : ''
-                }`}>
+                  active ? "bg-blue-500" : ""
+                }`}
+              >
                 <Icon
                   name={option.icon}
                   size={22}
-                  color={active ? '#ffffff' : colors.textSecondary}
+                  color={active ? "#ffffff" : colors.textSecondary}
                 />
                 <ThemedText
                   type="smallBold"
-                  className={active ? 'text-accent-foreground' : 'text-muted'}>
+                  className={active ? "text-white" : "text-muted"}
+                >
                   {option.label}
                 </ThemedText>
               </Pressable>
@@ -80,7 +86,7 @@ export default function SettingsScreen() {
           </View>
           <View className="flex-row items-center justify-between py-1">
             <ThemedText>Version</ThemedText>
-            <ThemedText type="muted">1.0.0</ThemedText>
+            <ThemedText type="muted">1.0.1</ThemedText>
           </View>
         </View>
       </View>

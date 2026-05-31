@@ -1,4 +1,5 @@
 import { useEvent } from 'expo';
+import * as Brightness from 'expo-brightness';
 import { LinearGradient } from 'expo-linear-gradient';
 import type { VideoPlayer } from 'expo-video';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -10,9 +11,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon, type IconName } from '@/components/icon';
 import { OptionsSheet, type SheetMode } from '@/components/player/options-sheet';
 import { SeekBar } from '@/components/player/seek-bar';
+import { VolumeManager } from 'react-native-volume-manager';
+
 import { SeekFeedback } from '@/components/player/seek-feedback';
 import { ThemedText } from '@/components/themed-text';
 import { formatDuration } from '@/lib/format';
+import { playerPrefs } from '@/lib/player-prefs';
 
 type VideoControlsProps = {
   player: VideoPlayer;
@@ -31,6 +35,7 @@ const DRAG_SEEK_SPAN = 90;
 
 type FeedbackState = { dir: 'forward' | 'backward'; seconds: number; nonce: number } | null;
 type SeekPreview = { target: number; delta: number } | null;
+type VerticalFeedback = { type: 'volume' | 'brightness'; value: number } | null;
 
 function IconButton({
   name,
@@ -65,11 +70,12 @@ export function VideoControls({
   hasPrev,
 }: VideoControlsProps) {
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const [visible, setVisible] = useState(true);
   const [scrubbing, setScrubbing] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
   const [seekPreview, setSeekPreview] = useState<SeekPreview>(null);
+  const [verticalFeedback, setVerticalFeedback] = useState<VerticalFeedback>(null);
   const [sheet, setSheet] = useState<SheetMode>(null);
 
   const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
@@ -97,6 +103,7 @@ export function VideoControls({
     const timer = setTimeout(() => setFeedback(null), 650);
     return () => clearTimeout(timer);
   }, [feedback]);
+
 
   const togglePlay = () => {
     if (isPlaying) player.pause();
@@ -128,6 +135,9 @@ export function VideoControls({
   const dragRef = useRef<GestureType | undefined>(undefined);
   // Anchor position captured at drag start (shared value = gesture-callback safe).
   const dragStart = useSharedValue(0);
+  // Vertical-drag scratch: value at start, and side (0 = volume/right, 1 = brightness/left).
+  const vStart = useSharedValue(0);
+  const vSide = useSharedValue(0);
 
   const gesture = useMemo(() => {
     const singleTap = Gesture.Tap()
@@ -181,10 +191,55 @@ export function VideoControls({
       })
       .onFinalize(() => setSeekPreview(null));
 
-    return Gesture.Race(drag, Gesture.Exclusive(doubleTap, singleTap));
-    // dragStart is a stable shared value; safe to omit from deps.
+    // Vertical drag: right half = volume, left half = brightness.
+    // A swipe over ~60% of the screen height covers the full 0–1 range.
+    const verticalDrag = Gesture.Pan()
+      .runOnJS(true)
+      .activeOffsetY([-15, 15])
+      .failOffsetX([-25, 25])
+      .onStart((event) => {
+        const isLeft = event.x < width / 2;
+        vSide.value = isLeft ? 1 : 0;
+        // Capture the current device value as the baseline for this drag.
+        if (isLeft) {
+          Brightness.getBrightnessAsync()
+            .then((value) => {
+              vStart.value = value;
+            })
+            .catch(() => {
+              vStart.value = 1;
+            });
+        } else {
+          VolumeManager.getVolume()
+            .then((result) => {
+              vStart.value = result.volume;
+            })
+            .catch(() => {
+              vStart.value = 1;
+            });
+        }
+      })
+      .onUpdate((event) => {
+        const next = Math.max(0, Math.min(1, vStart.value - event.translationY / (height * 0.6)));
+        if (vSide.value === 1) {
+          void Brightness.setBrightnessAsync(next);
+          playerPrefs.setBrightness(next);
+          setVerticalFeedback({ type: 'brightness', value: next });
+        } else {
+          // Device media volume — the OS persists this across sessions.
+          void VolumeManager.setVolume(next);
+          setVerticalFeedback({ type: 'volume', value: next });
+        }
+      })
+      .onFinalize(() => {
+        playerPrefs.persist();
+        setVerticalFeedback(null);
+      });
+
+    return Gesture.Race(drag, verticalDrag, Gesture.Exclusive(doubleTap, singleTap));
+    // dragStart/vStart/vSide/brightness are stable shared values; safe to omit from deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [width, player]);
+  }, [width, height, player]);
 
   return (
     <View style={StyleSheet.absoluteFill}>
@@ -219,6 +274,28 @@ export function VideoControls({
             <ThemedText className="text-sm font-medium text-white/70">
               {seekPreview.delta >= 0 ? '+' : '−'}
               {formatDuration(Math.abs(seekPreview.delta))}
+            </ThemedText>
+          </View>
+        </View>
+      )}
+
+      {/* Volume / brightness vertical-drag indicator. */}
+      {verticalFeedback && (
+        <View pointerEvents="none" style={StyleSheet.absoluteFill} className="items-center justify-center">
+          <View className="items-center gap-2 rounded-2xl bg-black/65 px-6 py-4">
+            <Icon
+              name={verticalFeedback.type === 'volume' ? 'volume' : 'brightness'}
+              size={28}
+              color="#ffffff"
+            />
+            <View className="h-1.5 w-28 overflow-hidden rounded-full bg-white/25">
+              <View
+                className="h-full rounded-full bg-white"
+                style={{ width: `${verticalFeedback.value * 100}%` }}
+              />
+            </View>
+            <ThemedText className="text-xs font-semibold text-white">
+              {Math.round(verticalFeedback.value * 100)}%
             </ThemedText>
           </View>
         </View>

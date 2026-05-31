@@ -29,6 +29,8 @@ const ICONS = {
   filter: { ios: 'line.3.horizontal.decrease', android: 'filter_list', web: 'filter_list' },
   check: { ios: 'checkmark', android: 'check', web: 'check' },
   captions: { ios: 'captions.bubble', android: 'closed_caption', web: 'closed_caption' },
+  volume: { ios: 'speaker.wave.2.fill', android: 'volume_up', web: 'volume_up' },
+  brightness: { ios: 'sun.max.fill', android: 'brightness_high', web: 'brightness_high' },
 } as const;
 
 export type IconName = keyof typeof ICONS;

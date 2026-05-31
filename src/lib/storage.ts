@@ -11,4 +11,6 @@ export const StorageKeys = {
   themePreference: 'theme-preference',
   sortOption: 'sort-option',
   playbackProgress: 'playback-progress',
+  playerVolume: 'player-volume',
+  playerBrightness: 'player-brightness',
 } as const;

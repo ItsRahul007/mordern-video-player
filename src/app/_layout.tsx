@@ -14,6 +14,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { useTheme } from '@/hooks/use-theme';
 import { playbackStore } from '@/lib/playback-store';
+import { playerPrefs } from '@/lib/player-prefs';
 import { QueryProvider } from '@/providers/query-provider';
 import { SortProvider } from '@/providers/sort-provider';
 import { ThemeProvider } from '@/providers/theme-provider';
@@ -42,6 +43,7 @@ export default function RootLayout() {
   // (the player rotates to landscape on its own for wide videos).
   useEffect(() => {
     void playbackStore.hydrate();
+    void playerPrefs.hydrate();
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
   }, []);
 

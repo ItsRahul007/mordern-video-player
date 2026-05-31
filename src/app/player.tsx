@@ -1,25 +1,33 @@
-import { useEvent, useEventListener } from 'expo';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as ScreenOrientation from 'expo-screen-orientation';
-import { useVideoPlayer, VideoView } from 'expo-video';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, StatusBar, View } from 'react-native';
+import { useEvent, useEventListener } from "expo";
+import * as Brightness from "expo-brightness";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import * as ScreenOrientation from "expo-screen-orientation";
+import { useVideoPlayer, VideoView } from "expo-video";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, StatusBar, View } from "react-native";
 
-import { VideoControls } from '@/components/player/video-controls';
-import { ThemedText } from '@/components/themed-text';
-import { useFolderVideos } from '@/hooks/use-video-folders';
-import { playbackStore, RESUME_THRESHOLD } from '@/lib/playback-store';
-import { sortVideos } from '@/lib/media';
-import { useSort } from '@/providers/sort-provider';
+import { VideoControls } from "@/components/player/video-controls";
+import { ThemedText } from "@/components/themed-text";
+import { useFolderVideos } from "@/hooks/use-video-folders";
+import { sortVideos } from "@/lib/media";
+import { playbackStore, RESUME_THRESHOLD } from "@/lib/playback-store";
+import { playerPrefs } from "@/lib/player-prefs";
+import { useSort } from "@/providers/sort-provider";
 
 export default function PlayerScreen() {
   const router = useRouter();
-  const { albumId, id } = useLocalSearchParams<{ albumId: string; id: string }>();
+  const { albumId, id } = useLocalSearchParams<{
+    albumId: string;
+    id: string;
+  }>();
   const { data: videos, isLoading } = useFolderVideos(albumId);
   const { sort } = useSort();
 
   // The playlist must match the order shown in the folder (the selected filter).
-  const playlist = useMemo(() => (videos ? sortVideos(videos, sort) : undefined), [videos, sort]);
+  const playlist = useMemo(
+    () => (videos ? sortVideos(videos, sort) : undefined),
+    [videos, sort],
+  );
 
   // Track the currently playing video within the folder playlist.
   const [currentId, setCurrentId] = useState(id);
@@ -31,6 +39,16 @@ export default function PlayerScreen() {
   const player = useVideoPlayer(current?.uri ?? null, (p) => {
     p.timeUpdateEventInterval = 0.5;
   });
+
+  // Apply the saved brightness on open; normalize (hand back to the system)
+  // when leaving the player. The chosen value stays persisted for next time.
+  useEffect(() => {
+    const saved = playerPrefs.getBrightness();
+    if (saved != null) void Brightness.setBrightnessAsync(saved);
+    return () => {
+      void Brightness.restoreSystemBrightnessAsync();
+    };
+  }, []);
 
   // Autoplay whenever the source resolves or changes (next/prev).
   useEffect(() => {
@@ -57,10 +75,12 @@ export default function PlayerScreen() {
   }, [current?.id, current]);
 
   // Seek to the captured position once the video is ready to play.
-  const { status } = useEvent(player, 'statusChange', { status: player.status });
+  const { status } = useEvent(player, "statusChange", {
+    status: player.status,
+  });
   const resumedIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (status !== 'readyToPlay' || !current) return;
+    if (status !== "readyToPlay" || !current) return;
     if (resumedIdRef.current === current.id) return;
     resumedIdRef.current = current.id;
 
@@ -71,12 +91,12 @@ export default function PlayerScreen() {
   }, [status, current?.id, current, player]);
 
   // Record progress as the video plays.
-  useEventListener(player, 'timeUpdate', ({ currentTime }) => {
+  useEventListener(player, "timeUpdate", ({ currentTime }) => {
     if (current) playbackStore.record(current.id, currentTime, player.duration);
   });
 
   // On pause, commit the position immediately so the library UI reflects it.
-  useEventListener(player, 'playingChange', ({ isPlaying }) => {
+  useEventListener(player, "playingChange", ({ isPlaying }) => {
     if (!isPlaying && current && player.duration > 0) {
       playbackStore.record(current.id, player.currentTime, player.duration);
       playbackStore.flush();
@@ -84,15 +104,17 @@ export default function PlayerScreen() {
   });
 
   const goNext = () => {
-    if (playlist && index >= 0 && index < playlist.length - 1) setCurrentId(playlist[index + 1].id);
+    if (playlist && index >= 0 && index < playlist.length - 1)
+      setCurrentId(playlist[index + 1].id);
   };
   const goPrev = () => {
     if (playlist && index > 0) setCurrentId(playlist[index - 1].id);
   };
 
   // Mark complete and auto-advance when the current video finishes.
-  useEventListener(player, 'playToEnd', () => {
-    if (current) playbackStore.record(current.id, player.duration, player.duration);
+  useEventListener(player, "playToEnd", () => {
+    if (current)
+      playbackStore.record(current.id, player.duration, player.duration);
     if (hasNext) goNext();
   });
 
@@ -101,6 +123,7 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (!current?.width || !current?.height) return;
     const landscape = current.width > current.height;
+
     void ScreenOrientation.lockAsync(
       landscape
         ? ScreenOrientation.OrientationLock.LANDSCAPE
@@ -112,7 +135,9 @@ export default function PlayerScreen() {
   useEffect(
     () => () => {
       playbackStore.flush();
-      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+      void ScreenOrientation.lockAsync(
+        ScreenOrientation.OrientationLock.PORTRAIT_UP,
+      );
     },
     [],
   );
@@ -132,7 +157,9 @@ export default function PlayerScreen() {
       ) : (
         <View className="flex-1 items-center justify-center">
           {!isLoading && !current ? (
-            <ThemedText className="text-white">Couldn’t load this video.</ThemedText>
+            <ThemedText className="text-white">
+              Couldn’t load this video.
+            </ThemedText>
           ) : (
             <ActivityIndicator color="#ffffff" />
           )}

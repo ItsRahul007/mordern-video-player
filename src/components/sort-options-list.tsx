@@ -23,7 +23,7 @@ export function SortOptionsList({ value, onChange }: SortOptionsListProps) {
   const { colors } = useTheme();
 
   return (
-    <View className="overflow-hidden rounded-2xl bg-surface">
+    <View className="overflow-hidden rounded-2xl bg-white dark:bg-black">
       {SORT_OPTIONS.map((option, index) => {
         const active = value === option.value;
         return (
