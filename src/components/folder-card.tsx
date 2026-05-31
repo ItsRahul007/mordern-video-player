@@ -9,15 +9,28 @@ import { useTheme } from '@/hooks/use-theme';
 type FolderCardProps = {
   folder: VideoFolder;
   onPress: () => void;
+  onLongPress?: () => void;
+  selectionActive?: boolean;
+  selected?: boolean;
 };
 
-export function FolderCard({ folder, onPress }: FolderCardProps) {
+export function FolderCard({
+  folder,
+  onPress,
+  onLongPress,
+  selectionActive = false,
+  selected = false,
+}: FolderCardProps) {
   const { colors } = useTheme();
 
   return (
     <Pressable
       onPress={onPress}
-      className="flex-row items-center gap-3 rounded-2xl bg-surface p-2.5 active:opacity-80">
+      onLongPress={onLongPress}
+      delayLongPress={250}
+      className={`flex-row items-center gap-3 rounded-2xl p-2.5 active:opacity-80 ${
+        selected ? 'bg-accent/20' : 'bg-surface'
+      }`}>
       <View className="h-16 w-24 overflow-hidden rounded-xl">
         <VideoThumbnail uri={folder.coverUri} seed={folder.id} />
       </View>
@@ -29,7 +42,16 @@ export function FolderCard({ folder, onPress }: FolderCardProps) {
           {folder.count} video{folder.count === 1 ? '' : 's'}
         </ThemedText>
       </View>
-      <Icon name="chevronRight" size={16} color={colors.textSecondary} />
+      {selectionActive ? (
+        <View
+          className={`h-6 w-6 items-center justify-center rounded-full border-2 ${
+            selected ? 'border-accent bg-accent' : 'border-muted'
+          }`}>
+          {selected && <Icon name="check" size={14} color="#ffffff" />}
+        </View>
+      ) : (
+        <Icon name="chevronRight" size={16} color={colors.textSecondary} />
+      )}
     </Pressable>
   );
 }

@@ -10,9 +10,18 @@ import type { VideoAsset } from "@/lib/media";
 type VideoRowProps = {
   video: VideoAsset;
   onPress: () => void;
+  onLongPress?: () => void;
+  selectionActive?: boolean;
+  selected?: boolean;
 };
 
-export function VideoRow({ video, onPress }: VideoRowProps) {
+export function VideoRow({
+  video,
+  onPress,
+  onLongPress,
+  selectionActive = false,
+  selected = false,
+}: VideoRowProps) {
   const entry = usePlaybackEntry(video.id);
   const fraction = entry
     ? entry.completed
@@ -25,7 +34,11 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
   return (
     <Pressable
       onPress={onPress}
-      className="flex-row items-center gap-3 rounded-2xl bg-surface p-2.5 active:opacity-80"
+      onLongPress={onLongPress}
+      delayLongPress={250}
+      className={`flex-row items-center gap-3 rounded-2xl p-2.5 active:opacity-80 ${
+        selected ? "bg-accent/20" : "bg-surface"
+      }`}
     >
       <View className="aspect-video w-28 overflow-hidden rounded-xl">
         <VideoThumbnail uri={video.uri} seed={video.id} />
@@ -62,6 +75,16 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
           </ThemedText>
         )}
       </View>
+
+      {selectionActive && (
+        <View
+          className={`h-6 w-6 items-center justify-center rounded-full border-2 ${
+            selected ? "border-accent bg-accent" : "border-muted"
+          }`}
+        >
+          {selected && <Icon name="check" size={14} color="#ffffff" />}
+        </View>
+      )}
     </Pressable>
   );
 }

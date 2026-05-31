@@ -2,7 +2,8 @@ import { useSyncExternalStore } from 'react';
 
 import { playbackStore, type PlaybackEntry } from '@/lib/playback-store';
 
-function useEntries() {
+/** All playback entries, keyed by video id. Re-renders on commit. */
+export function usePlaybackEntries(): Record<string, PlaybackEntry> {
   return useSyncExternalStore(
     playbackStore.subscribe,
     playbackStore.getSnapshot,
@@ -12,5 +13,5 @@ function useEntries() {
 
 /** Playback progress for a single video, or undefined if never played. */
 export function usePlaybackEntry(id: string): PlaybackEntry | undefined {
-  return useEntries()[id];
+  return usePlaybackEntries()[id];
 }

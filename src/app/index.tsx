@@ -1,7 +1,10 @@
-import { Icon } from "@/components/icon";
-import { useRouter } from "expo-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  BackHandler,
   FlatList,
   Pressable,
   RefreshControl,
@@ -10,13 +13,17 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { FolderCard } from "@/components/folder-card";
+import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { useMediaPermissions } from "@/hooks/use-permissions";
+import { useSelection } from "@/hooks/use-selection";
 import { useTheme } from "@/hooks/use-theme";
-import { useVideoFolders } from "@/hooks/use-video-folders";
+import { useVideoFolders, videoKeys } from "@/hooks/use-video-folders";
+import { deleteFolders } from "@/lib/media";
 
 export default function FoldersScreen() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { colors } = useTheme();
   const { granted, canAskAgain, requestPermission } = useMediaPermissions();
   const {
@@ -25,8 +32,60 @@ export default function FoldersScreen() {
     isRefetching,
     refetch,
   } = useVideoFolders(granted);
+  const selection = useSelection();
 
-  const header = (
+  // Hardware back exits folder-selection mode first.
+  const { active: selectionActive, clear: clearSelection } = selection;
+  useFocusEffect(
+    useCallback(() => {
+      const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+        if (selectionActive) {
+          clearSelection();
+          return true;
+        }
+        return false;
+      });
+      return () => sub.remove();
+    }, [selectionActive, clearSelection]),
+  );
+
+  const confirmDelete = () => {
+    const count = selection.count;
+    Alert.alert(
+      `Delete ${count} folder${count === 1 ? "" : "s"}?`,
+      "This permanently removes the folders and their videos from your device.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteFolders([...selection.selectedIds]);
+              selection.clear();
+              await queryClient.invalidateQueries({ queryKey: videoKeys.folders });
+            } catch {
+              // User cancelled the system dialog, or it failed.
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const header = selection.active ? (
+    <View className="flex-row items-center gap-2 px-2 pb-3 pt-2">
+      <Pressable onPress={selection.clear} hitSlop={10} className="p-2 active:opacity-70">
+        <Icon name="xmark" size={24} color={colors.text} />
+      </Pressable>
+      <ThemedText type="subtitle" className="flex-1">
+        {selection.count} selected
+      </ThemedText>
+      <Pressable onPress={confirmDelete} hitSlop={10} className="p-2 active:opacity-70">
+        <Icon name="trash" size={24} color="#ef4444" />
+      </Pressable>
+    </View>
+  ) : (
     <View className="flex-row items-start justify-between px-4 pb-3 pt-2">
       <View className="flex-1">
         <ThemedText type="title">Library</ThemedText>
@@ -82,12 +141,19 @@ export default function FoldersScreen() {
         renderItem={({ item }) => (
           <FolderCard
             folder={item}
-            onPress={() =>
-              router.push({
-                pathname: "/folder/[id]",
-                params: { id: item.id, title: item.title },
-              })
-            }
+            selectionActive={selection.active}
+            selected={selection.isSelected(item.id)}
+            onLongPress={() => selection.toggle(item.id)}
+            onPress={() => {
+              if (selection.active) {
+                selection.toggle(item.id);
+              } else {
+                router.push({
+                  pathname: "/folder/[id]",
+                  params: { id: item.id, title: item.title },
+                });
+              }
+            }}
           />
         )}
         refreshControl={

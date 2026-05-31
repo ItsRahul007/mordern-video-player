@@ -15,6 +15,8 @@ export type PlaybackEntry = {
   /** Total duration in seconds. */
   duration: number;
   completed: boolean;
+  /** When this entry was last updated (ms epoch) — used to find "last watched". */
+  updatedAt: number;
 };
 
 type Entries = Record<string, PlaybackEntry>;
@@ -86,7 +88,7 @@ export const playbackStore = {
     if (!id || duration <= 0) return;
     const completed = position >= duration * COMPLETE_RATIO;
     const previouslyCompleted = playbackStore.getEntry(id)?.completed ?? false;
-    pending[id] = { position, duration, completed };
+    pending[id] = { position, duration, completed, updatedAt: Date.now() };
 
     // Surface completion transitions to the UI immediately; otherwise batch.
     if (completed !== previouslyCompleted) {

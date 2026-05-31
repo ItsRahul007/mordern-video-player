@@ -118,6 +118,22 @@ export async function getFolderVideos(albumId: string): Promise<VideoAsset[]> {
   return Promise.all(assets.map(toVideoAsset));
 }
 
+/** Delete videos from the device (the OS shows its own confirmation dialog). */
+export async function deleteVideos(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await Asset.delete(ids.map((id) => new Asset(id)));
+}
+
+/** Delete whole folders and their videos. */
+export async function deleteFolders(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  // Android always removes the album's assets; `true` makes iOS do so too.
+  await Album.delete(
+    ids.map((id) => new Album(id)),
+    true,
+  );
+}
+
 /**
  * Generate a single still frame for a video. Returns a native image reference
  * that expo-image can render directly. The temporary player is released after.
