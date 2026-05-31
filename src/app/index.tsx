@@ -3,7 +3,6 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback } from "react";
 import {
   ActivityIndicator,
-  Alert,
   BackHandler,
   FlatList,
   Pressable,
@@ -49,39 +48,33 @@ export default function FoldersScreen() {
     }, [selectionActive, clearSelection]),
   );
 
-  const confirmDelete = () => {
-    const count = selection.count;
-    Alert.alert(
-      `Delete ${count} folder${count === 1 ? "" : "s"}?`,
-      "This permanently removes the folders and their videos from your device.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await deleteFolders([...selection.selectedIds]);
-              selection.clear();
-              await queryClient.invalidateQueries({ queryKey: videoKeys.folders });
-            } catch {
-              // User cancelled the system dialog, or it failed.
-            }
-          },
-        },
-      ],
-    );
+  const confirmDelete = async () => {
+    try {
+      await deleteFolders([...selection.selectedIds]);
+      selection.clear();
+      await queryClient.invalidateQueries({ queryKey: videoKeys.folders });
+    } catch {
+      // User cancelled the system dialog, or it failed.
+    }
   };
 
   const header = selection.active ? (
     <View className="flex-row items-center gap-2 px-2 pb-3 pt-2">
-      <Pressable onPress={selection.clear} hitSlop={10} className="p-2 active:opacity-70">
+      <Pressable
+        onPress={selection.clear}
+        hitSlop={10}
+        className="p-2 active:opacity-70"
+      >
         <Icon name="xmark" size={24} color={colors.text} />
       </Pressable>
       <ThemedText type="subtitle" className="flex-1">
         {selection.count} selected
       </ThemedText>
-      <Pressable onPress={confirmDelete} hitSlop={10} className="p-2 active:opacity-70">
+      <Pressable
+        onPress={confirmDelete}
+        hitSlop={10}
+        className="p-2 active:opacity-70"
+      >
         <Icon name="trash" size={24} color="#ef4444" />
       </Pressable>
     </View>
