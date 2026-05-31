@@ -10,11 +10,11 @@ import Animated, {
 type SeekBarProps = {
   /** Current playback progress, 0..1. */
   progress: number;
-  /** Called with a 0..1 fraction when the user finishes scrubbing. */
+  /** Called with a 0..1 fraction when the user taps or finishes scrubbing. */
   onSeek: (fraction: number) => void;
   /** Notifies the parent while the user is actively dragging. */
   onScrubbingChange?: (scrubbing: boolean) => void;
-  /** Gestures that this bar should win over (e.g. the overlay's tap-to-toggle). */
+  /** Gestures that this bar should win over (e.g. the overlay's tap/drag layer). */
   blockGestures?: React.RefObject<GestureType | undefined>[];
 };
 
@@ -30,13 +30,24 @@ export function SeekBar({ progress, onSeek, onScrubbingChange, blockGestures }: 
   const progressSV = useDerivedValue(() => progress, [progress]);
 
   const setScrubbing = (value: boolean) => onScrubbingChange?.(value);
+  const blocked = blockGestures ?? [];
 
+  // Tap: seek straight to the tapped position. A Pan often never activates for a
+  // tap-without-movement (so its onEnd never fires) — handle taps explicitly.
+  const tap = Gesture.Tap()
+    .maxDuration(300)
+    .blocksExternalGesture(...blocked)
+    .onEnd((e) => {
+      const fraction = width.value > 0 ? Math.max(0, Math.min(e.x, width.value)) / width.value : 0;
+      runOnJS(onSeek)(fraction);
+    });
+
+  // Drag: scrub. minDistance distinguishes it from a tap.
   const pan = Gesture.Pan()
-    .minDistance(0)
+    .minDistance(4)
     .maxPointers(1)
-    // Win the touch over the full-screen tap layer so taps on the bar always seek.
-    .blocksExternalGesture(...(blockGestures ?? []))
-    .onBegin((e) => {
+    .blocksExternalGesture(...blocked)
+    .onStart((e) => {
       scrubbing.value = true;
       scrubX.value = Math.max(0, Math.min(e.x, width.value));
       runOnJS(setScrubbing)(true);
@@ -46,10 +57,15 @@ export function SeekBar({ progress, onSeek, onScrubbingChange, blockGestures }: 
     })
     .onEnd(() => {
       const fraction = width.value > 0 ? scrubX.value / width.value : 0;
-      scrubbing.value = false;
       runOnJS(onSeek)(fraction);
+    })
+    // Always runs (even if the gesture is cancelled) — guarantees scrubbing resets.
+    .onFinalize(() => {
+      scrubbing.value = false;
       runOnJS(setScrubbing)(false);
     });
+
+  const gesture = Gesture.Race(pan, tap);
 
   const fillStyle = useAnimatedStyle(() => {
     const w = scrubbing.value ? scrubX.value : progressSV.value * width.value;
@@ -62,7 +78,7 @@ export function SeekBar({ progress, onSeek, onScrubbingChange, blockGestures }: 
   });
 
   return (
-    <GestureDetector gesture={pan}>
+    <GestureDetector gesture={gesture}>
       {/* Tall, opaque hit area so the thin track is easy to grab. */}
       <View className="justify-center" style={{ height: HIT_HEIGHT }} collapsable={false}>
         <View
@@ -71,7 +87,7 @@ export function SeekBar({ progress, onSeek, onScrubbingChange, blockGestures }: 
           }}
           className="overflow-visible rounded-full bg-white/30"
           style={{ height: TRACK_HEIGHT }}>
-          <Animated.View className="h-full rounded-full bg-accent" style={fillStyle} />
+          <Animated.View className="h-full rounded-full bg-white" style={fillStyle} />
           <Animated.View
             className="absolute rounded-full bg-white"
             style={[

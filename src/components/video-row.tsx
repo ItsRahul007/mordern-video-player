@@ -20,6 +20,8 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
       : Math.min(1, Math.max(0, entry.position / (video.duration || 1)))
     : 0;
 
+  const completedPercent = Math.round(fraction * 100);
+
   return (
     <Pressable
       onPress={onPress}
@@ -40,14 +42,14 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
           </ThemedText>
         </View>
 
-        {fraction > 0 && (
-          <View className="absolute bottom-2 left-0 right-0 h-1 bg-black/35">
+        {fraction > 0 ? (
+          <View className="absolute bottom-0 left-0 right-0 h-1">
             <View
-              className="h-full rounded-r bg-accent"
-              style={{ width: `${fraction * 100}%` }}
+              className="h-full rounded-r bg-blue-500"
+              style={{ width: `${completedPercent}%` }}
             />
           </View>
-        )}
+        ) : null}
       </View>
 
       <View className="flex-1">
@@ -56,9 +58,7 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
         </ThemedText>
         {entry && (
           <ThemedText type="muted" className="mt-1">
-            {entry.completed
-              ? "Watched"
-              : `${Math.round(fraction * 100)}% watched`}
+            {entry.completed ? "Watched" : `${completedPercent}% watched`}
           </ThemedText>
         )}
       </View>

@@ -37,7 +37,26 @@ export default function PlayerScreen() {
     if (current?.uri) player.play();
   }, [current?.uri, player]);
 
-  // Resume from the saved position once the (new) video is ready to play.
+  // Capture the saved resume position the moment the video changes — BEFORE
+  // playback starts recording (which would overwrite the stored position with
+  // ~0 and defeat the resume).
+  const resumeTargetRef = useRef<{ id: string; position: number } | null>(null);
+  useEffect(() => {
+    if (!current) {
+      resumeTargetRef.current = null;
+      return;
+    }
+    const entry = playbackStore.getEntry(current.id);
+    resumeTargetRef.current =
+      entry &&
+      !entry.completed &&
+      entry.position > RESUME_THRESHOLD &&
+      entry.position < entry.duration - RESUME_THRESHOLD
+        ? { id: current.id, position: entry.position }
+        : null;
+  }, [current?.id, current]);
+
+  // Seek to the captured position once the video is ready to play.
   const { status } = useEvent(player, 'statusChange', { status: player.status });
   const resumedIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -45,21 +64,23 @@ export default function PlayerScreen() {
     if (resumedIdRef.current === current.id) return;
     resumedIdRef.current = current.id;
 
-    const entry = playbackStore.getEntry(current.id);
-    if (
-      entry &&
-      !entry.completed &&
-      entry.position > RESUME_THRESHOLD &&
-      entry.position < player.duration - RESUME_THRESHOLD
-    ) {
-      // Seek to the saved position (method call avoids mutating the player ref).
-      player.seekBy(entry.position - player.currentTime);
+    const target = resumeTargetRef.current;
+    if (target && target.id === current.id) {
+      player.seekBy(target.position - player.currentTime);
     }
   }, [status, current?.id, current, player]);
 
   // Record progress as the video plays.
   useEventListener(player, 'timeUpdate', ({ currentTime }) => {
     if (current) playbackStore.record(current.id, currentTime, player.duration);
+  });
+
+  // On pause, commit the position immediately so the library UI reflects it.
+  useEventListener(player, 'playingChange', ({ isPlaying }) => {
+    if (!isPlaying && current && player.duration > 0) {
+      playbackStore.record(current.id, player.currentTime, player.duration);
+      playbackStore.flush();
+    }
   });
 
   const goNext = () => {
