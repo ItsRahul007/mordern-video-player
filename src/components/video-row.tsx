@@ -1,11 +1,11 @@
-import { Pressable, View } from 'react-native';
+import { Pressable, View } from "react-native";
 
-import { Icon } from '@/components/icon';
-import { ThemedText } from '@/components/themed-text';
-import { VideoThumbnail } from '@/components/video-thumbnail';
-import { usePlaybackEntry } from '@/hooks/use-playback';
-import { formatDuration } from '@/lib/format';
-import type { VideoAsset } from '@/lib/media';
+import { Icon } from "@/components/icon";
+import { ThemedText } from "@/components/themed-text";
+import { VideoThumbnail } from "@/components/video-thumbnail";
+import { usePlaybackEntry } from "@/hooks/use-playback";
+import { formatDuration } from "@/lib/format";
+import type { VideoAsset } from "@/lib/media";
 
 type VideoRowProps = {
   video: VideoAsset;
@@ -23,7 +23,8 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
   return (
     <Pressable
       onPress={onPress}
-      className="flex-row items-center gap-3 rounded-2xl bg-surface p-2.5 active:opacity-80">
+      className="flex-row items-center gap-3 rounded-2xl bg-surface p-2.5 active:opacity-80"
+    >
       <View className="aspect-video w-28 overflow-hidden rounded-xl">
         <VideoThumbnail uri={video.uri} seed={video.id} />
 
@@ -34,14 +35,17 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
         )}
 
         <View className="absolute bottom-1 right-1 rounded bg-black/65 px-1 py-0.5">
-          <ThemedText className="text-[10px] font-semibold text-white">
+          <ThemedText className="text-sm font-semibold text-white">
             {formatDuration(video.duration)}
           </ThemedText>
         </View>
 
         {fraction > 0 && (
-          <View className="absolute bottom-0 left-0 right-0 h-1 bg-black/35">
-            <View className="h-full rounded-r bg-accent" style={{ width: `${fraction * 100}%` }} />
+          <View className="absolute bottom-2 left-0 right-0 h-1 bg-black/35">
+            <View
+              className="h-full rounded-r bg-accent"
+              style={{ width: `${fraction * 100}%` }}
+            />
           </View>
         )}
       </View>
@@ -52,7 +56,9 @@ export function VideoRow({ video, onPress }: VideoRowProps) {
         </ThemedText>
         {entry && (
           <ThemedText type="muted" className="mt-1">
-            {entry.completed ? 'Watched' : `${Math.round(fraction * 100)}% watched`}
+            {entry.completed
+              ? "Watched"
+              : `${Math.round(fraction * 100)}% watched`}
           </ThemedText>
         )}
       </View>
