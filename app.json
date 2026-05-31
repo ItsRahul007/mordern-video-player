@@ -57,7 +57,8 @@
           "videosPermission": "Allow $(PRODUCT_NAME) to access your videos.",
           "isAccessMediaLocationEnabled": false
         }
-      ]
+      ],
+      "./plugins/with-single-abi.js"
     ],
     "experiments": {
       "typedRoutes": true,
