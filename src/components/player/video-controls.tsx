@@ -135,9 +135,11 @@ export function VideoControls({
   const dragRef = useRef<GestureType | undefined>(undefined);
   // Anchor position captured at drag start (shared value = gesture-callback safe).
   const dragStart = useSharedValue(0);
-  // Vertical-drag scratch: value at start, and side (0 = volume/right, 1 = brightness/left).
+  // Vertical-drag scratch: live value being adjusted, side (0 = volume/right,
+  // 1 = brightness/left), and whether the async baseline has loaded yet.
   const vStart = useSharedValue(0);
   const vSide = useSharedValue(0);
+  const vReady = useSharedValue(false);
 
   const gesture = useMemo(() => {
     const singleTap = Gesture.Tap()
@@ -198,29 +200,39 @@ export function VideoControls({
       .activeOffsetY([-15, 15])
       .failOffsetX([-25, 25])
       .onStart((event) => {
+        // Read the CURRENT device value as the baseline (async). Until it
+        // resolves, ignore movement so we never adjust from a stale value
+        // (which previously cross-contaminated volume <-> brightness).
+        vReady.value = false;
         const isLeft = event.x < width / 2;
         vSide.value = isLeft ? 1 : 0;
-        // Capture the current device value as the baseline for this drag.
         if (isLeft) {
           Brightness.getBrightnessAsync()
             .then((value) => {
               vStart.value = value;
+              vReady.value = true;
             })
             .catch(() => {
               vStart.value = 1;
+              vReady.value = true;
             });
         } else {
           VolumeManager.getVolume()
             .then((result) => {
               vStart.value = result.volume;
+              vReady.value = true;
             })
             .catch(() => {
               vStart.value = 1;
+              vReady.value = true;
             });
         }
       })
-      .onUpdate((event) => {
-        const next = Math.max(0, Math.min(1, vStart.value - event.translationY / (height * 0.6)));
+      // Accumulate per-frame deltas onto the live value (not a reused baseline).
+      .onChange((event) => {
+        if (!vReady.value) return;
+        const next = Math.max(0, Math.min(1, vStart.value - event.changeY / (height * 0.6)));
+        vStart.value = next;
         if (vSide.value === 1) {
           void Brightness.setBrightnessAsync(next);
           playerPrefs.setBrightness(next);
