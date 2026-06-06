@@ -14,6 +14,8 @@ import { playbackStore, RESUME_THRESHOLD } from "@/lib/playback-store";
 import { playerPrefs } from "@/lib/player-prefs";
 import { useSort } from "@/providers/sort-provider";
 
+type Orientation = "landscape" | "portrait";
+
 export default function PlayerScreen() {
   const router = useRouter();
   const { albumId, id } = useLocalSearchParams<{
@@ -39,6 +41,44 @@ export default function PlayerScreen() {
   const player = useVideoPlayer(current?.uri ?? null, (p) => {
     p.timeUpdateEventInterval = 0.5;
   });
+
+  // The decoder reports the true display size of the loaded video (already
+  // corrected for any rotation metadata in the container), which is more
+  // reliable than the media-library width/height. We keep the library values
+  // as a fallback for the brief window before the source loads.
+  const [videoSize, setVideoSize] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  useEventListener(player, "sourceLoad", ({ availableVideoTracks }) => {
+    const size = availableVideoTracks?.[0]?.size;
+    if (size?.width && size?.height) setVideoSize(size);
+  });
+
+  // A manual override set by the rotate button; cleared whenever the video
+  // changes so each clip starts from its own auto-detected orientation. Reset
+  // during render (React's "adjust state on prop change" pattern) rather than
+  // in an effect, so the new clip never flashes the previous one's state.
+  const [manualOrientation, setManualOrientation] = useState<Orientation | null>(
+    null,
+  );
+  const [trackedId, setTrackedId] = useState(current?.id);
+  if (current?.id !== trackedId) {
+    setTrackedId(current?.id);
+    setManualOrientation(null);
+    setVideoSize(null);
+  }
+
+  const autoOrientation: Orientation = useMemo(() => {
+    const w = videoSize?.width ?? current?.width ?? 0;
+    const h = videoSize?.height ?? current?.height ?? 0;
+    // Square videos default to portrait so the phone stays upright.
+    return w > h ? "landscape" : "portrait";
+  }, [videoSize, current?.width, current?.height]);
+
+  const orientation = manualOrientation ?? autoOrientation;
+  const toggleOrientation = () =>
+    setManualOrientation(orientation === "landscape" ? "portrait" : "landscape");
 
   // Apply the saved brightness on open; normalize (hand back to the system)
   // when leaving the player. The chosen value stays persisted for next time.
@@ -119,17 +159,14 @@ export default function PlayerScreen() {
   });
 
   // Rotate the screen to match the video: landscape videos play horizontally,
-  // portrait videos stay vertical.
+  // portrait videos stay vertical. The rotate button can override this.
   useEffect(() => {
-    if (!current?.width || !current?.height) return;
-    const landscape = current.width > current.height;
-
     void ScreenOrientation.lockAsync(
-      landscape
+      orientation === "landscape"
         ? ScreenOrientation.OrientationLock.LANDSCAPE
         : ScreenOrientation.OrientationLock.PORTRAIT_UP,
     );
-  }, [current?.width, current?.height]);
+  }, [orientation]);
 
   // Persist progress and restore portrait when leaving the player.
   useEffect(
@@ -175,6 +212,8 @@ export default function PlayerScreen() {
           onPrev={goPrev}
           hasNext={hasNext}
           hasPrev={hasPrev}
+          orientation={orientation}
+          onToggleOrientation={toggleOrientation}
         />
       )}
     </View>

@@ -31,6 +31,7 @@ const ICONS = {
   captions: { ios: 'captions.bubble', android: 'closed_caption', web: 'closed_caption' },
   volume: { ios: 'speaker.wave.2.fill', android: 'volume_up', web: 'volume_up' },
   brightness: { ios: 'sun.max.fill', android: 'brightness_high', web: 'brightness_high' },
+  rotate: { ios: 'rotate.right', android: 'screen_rotation', web: 'screen_rotation' },
   trash: { ios: 'trash', android: 'delete', web: 'delete' },
   xmark: { ios: 'xmark', android: 'close', web: 'close' },
 } as const;

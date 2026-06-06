@@ -26,6 +26,8 @@ type VideoControlsProps = {
   onPrev?: () => void;
   hasNext?: boolean;
   hasPrev?: boolean;
+  orientation?: 'landscape' | 'portrait';
+  onToggleOrientation?: () => void;
 };
 
 const HIDE_DELAY = 3500;
@@ -68,6 +70,7 @@ export function VideoControls({
   onPrev,
   hasNext,
   hasPrev,
+  onToggleOrientation,
 }: VideoControlsProps) {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
@@ -339,6 +342,9 @@ export function VideoControls({
                   className="flex-1 text-base font-semibold text-white">
                   {title}
                 </ThemedText>
+              )}
+              {onToggleOrientation && (
+                <IconButton name="rotate" size={22} onPress={onToggleOrientation} />
               )}
               <IconButton name="captions" size={24} onPress={() => setSheet('cc')} />
               <IconButton name="settings" size={22} onPress={() => setSheet('settings')} />
