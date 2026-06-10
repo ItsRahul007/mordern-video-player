@@ -13,4 +13,5 @@ export const StorageKeys = {
   playbackProgress: 'playback-progress',
   playerVolume: 'player-volume',
   playerBrightness: 'player-brightness',
+  playerAudioLanguage: 'player-audio-language',
 } as const;

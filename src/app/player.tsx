@@ -3,11 +3,20 @@ import * as Brightness from "expo-brightness";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useVideoPlayer, VideoView } from "expo-video";
+import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, StatusBar, View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+} from "react-native-reanimated";
 
 import { VideoControls } from "@/components/player/video-controls";
 import { ThemedText } from "@/components/themed-text";
+import {
+  audioTrackLanguage,
+  pickPreferredAudioTrack,
+} from "@/lib/audio-track";
 import { useFolderVideos } from "@/hooks/use-video-folders";
 import { sortVideos } from "@/lib/media";
 import { playbackStore, RESUME_THRESHOLD } from "@/lib/playback-store";
@@ -62,12 +71,26 @@ export default function PlayerScreen() {
   const [manualOrientation, setManualOrientation] = useState<Orientation | null>(
     null,
   );
+  // Pinch-to-zoom scale (1 = fit, capped at 2 = 200%). Owned here so the
+  // transform applies to the VideoView; the pinch gesture lives in the controls.
+  const zoom = useSharedValue(1);
+  const zoomStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: zoom.value }],
+  }));
+
   const [trackedId, setTrackedId] = useState(current?.id);
   if (current?.id !== trackedId) {
     setTrackedId(current?.id);
     setManualOrientation(null);
     setVideoSize(null);
   }
+
+  // Reset zoom to fit whenever the video changes. A shared value is mutable by
+  // design; the immutability rule doesn't account for Reanimated.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/immutability
+    zoom.value = 1;
+  }, [current?.id, zoom]);
 
   const autoOrientation: Orientation = useMemo(() => {
     const w = videoSize?.width ?? current?.width ?? 0;
@@ -79,6 +102,10 @@ export default function PlayerScreen() {
   const orientation = manualOrientation ?? autoOrientation;
   const toggleOrientation = () =>
     setManualOrientation(orientation === "landscape" ? "portrait" : "landscape");
+
+  // The status bar (clock, battery, notifications) follows the player controls:
+  // visible while the overlay is up, hidden when it auto-hides.
+  const [controlsVisible, setControlsVisible] = useState(true);
 
   // Apply the saved brightness on open; normalize (hand back to the system)
   // when leaving the player. The chosen value stays persisted for next time.
@@ -94,6 +121,33 @@ export default function PlayerScreen() {
   useEffect(() => {
     if (current?.uri) player.play();
   }, [current?.uri, player]);
+
+  // Pick the audio track once per video: the user's saved language if present,
+  // else Hindi if available, else the video's own default (left untouched).
+  const { availableAudioTracks } = useEvent(player, "availableAudioTracksChange", {
+    availableAudioTracks: player.availableAudioTracks,
+  });
+  const audioAppliedRef = useRef<string | null>(null);
+  // expo-video's player is a mutable native object; assigning audioTrack selects
+  // it — safe here because the effect runs after render, keyed to the video id.
+  // eslint-disable-next-line react-hooks/immutability
+  useEffect(() => {
+    if (!current || !availableAudioTracks?.length) return;
+    if (audioAppliedRef.current === current.id) return;
+    audioAppliedRef.current = current.id;
+
+    const desired = pickPreferredAudioTrack(
+      availableAudioTracks,
+      playerPrefs.getAudioLanguage(),
+    );
+    const currentLang = player.audioTrack
+      ? audioTrackLanguage(player.audioTrack)
+      : null;
+    if (desired && audioTrackLanguage(desired) !== currentLang) {
+      // eslint-disable-next-line react-hooks/immutability
+      player.audioTrack = desired;
+    }
+  }, [availableAudioTracks, current?.id, current, player]);
 
   // Capture the saved resume position the moment the video changes — BEFORE
   // playback starts recording (which would overwrite the stored position with
@@ -181,16 +235,24 @@ export default function PlayerScreen() {
 
   return (
     <View className="flex-1 bg-black">
-      <StatusBar hidden />
+      <StatusBar
+        hidden={!controlsVisible}
+        style="light"
+        animated
+        hideTransitionAnimation="fade"
+      />
 
       {current ? (
-        <VideoView
-          player={player}
-          style={{ flex: 1 }}
-          contentFit="contain"
-          nativeControls={false}
-          allowsPictureInPicture
-        />
+        <Animated.View style={[{ flex: 1 }, zoomStyle]}>
+          <VideoView
+            player={player}
+            style={{ flex: 1 }}
+            contentFit="contain"
+            nativeControls={false}
+            allowsPictureInPicture
+            surfaceType="textureView"
+          />
+        </Animated.View>
       ) : (
         <View className="flex-1 items-center justify-center">
           {!isLoading && !current ? (
@@ -214,6 +276,8 @@ export default function PlayerScreen() {
           hasPrev={hasPrev}
           orientation={orientation}
           onToggleOrientation={toggleOrientation}
+          onVisibilityChange={setControlsVisible}
+          zoom={zoom}
         />
       )}
     </View>

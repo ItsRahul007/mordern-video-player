@@ -4,6 +4,8 @@ import { Modal, Pressable, ScrollView, View } from 'react-native';
 
 import { Icon } from '@/components/icon';
 import { ThemedText } from '@/components/themed-text';
+import { audioTrackLanguage } from '@/lib/audio-track';
+import { playerPrefs } from '@/lib/player-prefs';
 
 export type SheetMode = 'cc' | 'settings' | null;
 
@@ -66,6 +68,8 @@ export function OptionsSheet({ player, mode, onClose }: OptionsSheetProps) {
   const selectAudio = (track: AudioTrack) => {
     // eslint-disable-next-line react-hooks/immutability
     player.audioTrack = track;
+    // Remember this language so future videos default to it (overriding Hindi).
+    playerPrefs.setAudioLanguage(audioTrackLanguage(track));
   };
   const selectRate = (rate: number) => {
     // eslint-disable-next-line react-hooks/immutability

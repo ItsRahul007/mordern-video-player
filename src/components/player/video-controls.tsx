@@ -1,22 +1,34 @@
-import { useEvent } from 'expo';
-import * as Brightness from 'expo-brightness';
-import { LinearGradient } from 'expo-linear-gradient';
-import type { VideoPlayer } from 'expo-video';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
-import { Gesture, GestureDetector, type GestureType } from 'react-native-gesture-handler';
-import Animated, { FadeIn, FadeOut, useSharedValue } from 'react-native-reanimated';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useEvent } from "expo";
+import * as Brightness from "expo-brightness";
+import { LinearGradient } from "expo-linear-gradient";
+import type { VideoPlayer } from "expo-video";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
+import {
+  Gesture,
+  GestureDetector,
+  type GestureType,
+} from "react-native-gesture-handler";
+import Animated, {
+  FadeIn,
+  FadeOut,
+  type SharedValue,
+  useSharedValue,
+} from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { Icon, type IconName } from '@/components/icon';
-import { OptionsSheet, type SheetMode } from '@/components/player/options-sheet';
-import { SeekBar } from '@/components/player/seek-bar';
-import { VolumeManager } from 'react-native-volume-manager';
+import { Icon, type IconName } from "@/components/icon";
+import {
+  OptionsSheet,
+  type SheetMode,
+} from "@/components/player/options-sheet";
+import { SeekBar } from "@/components/player/seek-bar";
+import { VolumeManager } from "react-native-volume-manager";
 
-import { SeekFeedback } from '@/components/player/seek-feedback';
-import { ThemedText } from '@/components/themed-text';
-import { formatDuration } from '@/lib/format';
-import { playerPrefs } from '@/lib/player-prefs';
+import { SeekFeedback } from "@/components/player/seek-feedback";
+import { ThemedText } from "@/components/themed-text";
+import { formatDuration } from "@/lib/format";
+import { playerPrefs } from "@/lib/player-prefs";
 
 type VideoControlsProps = {
   player: VideoPlayer;
@@ -26,18 +38,28 @@ type VideoControlsProps = {
   onPrev?: () => void;
   hasNext?: boolean;
   hasPrev?: boolean;
-  orientation?: 'landscape' | 'portrait';
+  orientation?: "landscape" | "portrait";
   onToggleOrientation?: () => void;
+  onVisibilityChange?: (visible: boolean) => void;
+  /** Pinch-to-zoom scale, owned by the player (1 = fit, 2 = 200% max). */
+  zoom?: SharedValue<number>;
 };
 
 const HIDE_DELAY = 3500;
 const SEEK_STEP = 10;
+/** Pinch-to-zoom bounds: 1 = fit-to-screen, 2 = 200% (max in and out). */
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 2;
 /** Seconds skipped per full-width horizontal drag across the video. */
 const DRAG_SEEK_SPAN = 90;
 
-type FeedbackState = { dir: 'forward' | 'backward'; seconds: number; nonce: number } | null;
+type FeedbackState = {
+  dir: "forward" | "backward";
+  seconds: number;
+  nonce: number;
+} | null;
 type SeekPreview = { target: number; delta: number } | null;
-type VerticalFeedback = { type: 'volume' | 'brightness'; value: number } | null;
+type VerticalFeedback = { type: "volume" | "brightness"; value: number } | null;
 
 function IconButton({
   name,
@@ -56,7 +78,8 @@ function IconButton({
       disabled={disabled}
       hitSlop={12}
       className="active:opacity-70"
-      style={{ opacity: disabled ? 0.3 : 1 }}>
+      style={{ opacity: disabled ? 0.3 : 1 }}
+    >
       <Icon name={name} size={size} color="#ffffff" />
     </Pressable>
   );
@@ -71,6 +94,8 @@ export function VideoControls({
   hasNext,
   hasPrev,
   onToggleOrientation,
+  onVisibilityChange,
+  zoom,
 }: VideoControlsProps) {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
@@ -78,11 +103,14 @@ export function VideoControls({
   const [scrubbing, setScrubbing] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
   const [seekPreview, setSeekPreview] = useState<SeekPreview>(null);
-  const [verticalFeedback, setVerticalFeedback] = useState<VerticalFeedback>(null);
+  const [verticalFeedback, setVerticalFeedback] =
+    useState<VerticalFeedback>(null);
   const [sheet, setSheet] = useState<SheetMode>(null);
 
-  const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
-  const { currentTime } = useEvent(player, 'timeUpdate', {
+  const { isPlaying } = useEvent(player, "playingChange", {
+    isPlaying: player.playing,
+  });
+  const { currentTime } = useEvent(player, "timeUpdate", {
     currentTime: player.currentTime,
     currentLiveTimestamp: null,
     currentOffsetFromLive: null,
@@ -91,6 +119,12 @@ export function VideoControls({
 
   const duration = player.duration ?? 0;
   const progress = duration > 0 ? currentTime / duration : 0;
+
+  // Mirror control visibility to the parent so it can show/hide the system
+  // status bar in step with the overlay.
+  useEffect(() => {
+    onVisibilityChange?.(visible);
+  }, [visible, onVisibilityChange]);
 
   // Auto-hide while playing and not scrubbing. Re-runs (and resets the timer)
   // whenever visibility/playback/scrubbing changes.
@@ -107,7 +141,6 @@ export function VideoControls({
     return () => clearTimeout(timer);
   }, [feedback]);
 
-
   const togglePlay = () => {
     if (isPlaying) player.pause();
     else player.play();
@@ -120,7 +153,7 @@ export function VideoControls({
   };
 
   // Accumulate the skip amount so rapid double-taps read "10s, 20s, 30s…".
-  const bumpFeedback = (dir: 'forward' | 'backward') =>
+  const bumpFeedback = (dir: "forward" | "backward") =>
     setFeedback((prev) => ({
       dir,
       seconds: prev && prev.dir === dir ? prev.seconds + SEEK_STEP : SEEK_STEP,
@@ -143,6 +176,10 @@ export function VideoControls({
   const vStart = useSharedValue(0);
   const vSide = useSharedValue(0);
   const vReady = useSharedValue(false);
+  // Zoom scale captured at pinch start (fallback shared value if no zoom prop).
+  const pinchStart = useSharedValue(1);
+  const localZoom = useSharedValue(1);
+  const zoomValue = zoom ?? localZoom;
 
   const gesture = useMemo(() => {
     const singleTap = Gesture.Tap()
@@ -161,10 +198,10 @@ export function VideoControls({
       .onEnd((event) => {
         if (event.x < width / 3) {
           player.seekBy(-SEEK_STEP);
-          bumpFeedback('backward');
+          bumpFeedback("backward");
         } else if (event.x > (width * 2) / 3) {
           player.seekBy(SEEK_STEP);
-          bumpFeedback('forward');
+          bumpFeedback("forward");
         } else {
           if (player.playing) player.pause();
           else player.play();
@@ -173,7 +210,13 @@ export function VideoControls({
       });
 
     const targetFor = (translationX: number, dur: number) =>
-      Math.max(0, Math.min(dur, dragStart.value + (translationX / width) * DRAG_SEEK_SPAN));
+      Math.max(
+        0,
+        Math.min(
+          dur,
+          dragStart.value + (translationX / width) * DRAG_SEEK_SPAN,
+        ),
+      );
 
     const drag = Gesture.Pan()
       // eslint-disable-next-line react-hooks/refs
@@ -192,7 +235,10 @@ export function VideoControls({
       })
       .onEnd((event) => {
         const dur = player.duration || 0;
-        if (dur > 0) player.seekBy(targetFor(event.translationX, dur) - player.currentTime);
+        if (dur > 0)
+          player.seekBy(
+            targetFor(event.translationX, dur) - player.currentTime,
+          );
       })
       .onFinalize(() => setSeekPreview(null));
 
@@ -234,16 +280,19 @@ export function VideoControls({
       // Accumulate per-frame deltas onto the live value (not a reused baseline).
       .onChange((event) => {
         if (!vReady.value) return;
-        const next = Math.max(0, Math.min(1, vStart.value - event.changeY / (height * 0.6)));
+        const next = Math.max(
+          0,
+          Math.min(1, vStart.value - event.changeY / (height * 0.6)),
+        );
         vStart.value = next;
         if (vSide.value === 1) {
           void Brightness.setBrightnessAsync(next);
           playerPrefs.setBrightness(next);
-          setVerticalFeedback({ type: 'brightness', value: next });
+          setVerticalFeedback({ type: "brightness", value: next });
         } else {
           // Device media volume — the OS persists this across sessions.
           void VolumeManager.setVolume(next);
-          setVerticalFeedback({ type: 'volume', value: next });
+          setVerticalFeedback({ type: "volume", value: next });
         }
       })
       .onFinalize(() => {
@@ -251,8 +300,26 @@ export function VideoControls({
         setVerticalFeedback(null);
       });
 
-    return Gesture.Race(drag, verticalDrag, Gesture.Exclusive(doubleTap, singleTap));
-    // dragStart/vStart/vSide/brightness are stable shared values; safe to omit from deps.
+    // Two-finger pinch to zoom the video, clamped to 100%–200%. Runs on the UI
+    // thread (no runOnJS) so the scale tracks the fingers smoothly.
+    const pinch = Gesture.Pinch()
+      .onStart(() => {
+        pinchStart.value = zoomValue.value;
+      })
+      .onUpdate((event) => {
+        zoomValue.value = Math.min(
+          MAX_ZOOM,
+          Math.max(MIN_ZOOM, pinchStart.value * event.scale),
+        );
+      });
+
+    return Gesture.Race(
+      pinch,
+      drag,
+      verticalDrag,
+      Gesture.Exclusive(doubleTap, singleTap),
+    );
+    // dragStart/vStart/vSide/zoom are stable shared values; safe to omit from deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [width, height, player]);
 
@@ -265,15 +332,27 @@ export function VideoControls({
 
       {/* Animated double-tap seek feedback (left or right half). */}
       {feedback && (
-        <View pointerEvents="none" style={StyleSheet.absoluteFill} className="flex-row">
+        <View
+          pointerEvents="none"
+          style={StyleSheet.absoluteFill}
+          className="flex-row"
+        >
           <View className="flex-1 items-center justify-center">
-            {feedback.dir === 'backward' && (
-              <SeekFeedback key={feedback.nonce} direction="backward" seconds={feedback.seconds} />
+            {feedback.dir === "backward" && (
+              <SeekFeedback
+                key={feedback.nonce}
+                direction="backward"
+                seconds={feedback.seconds}
+              />
             )}
           </View>
           <View className="flex-1 items-center justify-center">
-            {feedback.dir === 'forward' && (
-              <SeekFeedback key={feedback.nonce} direction="forward" seconds={feedback.seconds} />
+            {feedback.dir === "forward" && (
+              <SeekFeedback
+                key={feedback.nonce}
+                direction="forward"
+                seconds={feedback.seconds}
+              />
             )}
           </View>
         </View>
@@ -281,13 +360,17 @@ export function VideoControls({
 
       {/* Drag-to-seek time preview. */}
       {seekPreview && (
-        <View pointerEvents="none" style={StyleSheet.absoluteFill} className="items-center justify-center">
+        <View
+          pointerEvents="none"
+          style={StyleSheet.absoluteFill}
+          className="items-center justify-center"
+        >
           <View className="items-center gap-1 rounded-2xl bg-black/65 px-6 py-3">
             <ThemedText className="text-2xl font-bold text-white">
               {formatDuration(seekPreview.target)}
             </ThemedText>
             <ThemedText className="text-sm font-medium text-white/70">
-              {seekPreview.delta >= 0 ? '+' : '−'}
+              {seekPreview.delta >= 0 ? "+" : "−"}
               {formatDuration(Math.abs(seekPreview.delta))}
             </ThemedText>
           </View>
@@ -296,10 +379,16 @@ export function VideoControls({
 
       {/* Volume / brightness vertical-drag indicator. */}
       {verticalFeedback && (
-        <View pointerEvents="none" style={StyleSheet.absoluteFill} className="items-center justify-center">
+        <View
+          pointerEvents="none"
+          style={StyleSheet.absoluteFill}
+          className="items-center justify-center"
+        >
           <View className="items-center gap-2 rounded-2xl bg-black/65 px-6 py-4">
             <Icon
-              name={verticalFeedback.type === 'volume' ? 'volume' : 'brightness'}
+              name={
+                verticalFeedback.type === "volume" ? "volume" : "brightness"
+              }
               size={28}
               color="#ffffff"
             />
@@ -321,9 +410,10 @@ export function VideoControls({
           entering={FadeIn.duration(150)}
           exiting={FadeOut.duration(150)}
           pointerEvents="box-none"
-          style={StyleSheet.absoluteFill}>
+          style={StyleSheet.absoluteFill}
+        >
           <LinearGradient
-            colors={['rgba(0,0,0,0.6)', 'transparent', 'rgba(0,0,0,0.75)']}
+            colors={["rgba(0,0,0,0.6)", "transparent", "rgba(0,0,0,0.75)"]}
             locations={[0, 0.45, 1]}
             style={StyleSheet.absoluteFill}
             pointerEvents="none"
@@ -334,35 +424,76 @@ export function VideoControls({
             <View
               pointerEvents="box-none"
               className="flex-row items-center gap-3 px-5"
-              style={{ paddingTop: insets.top + 8 }}>
-              <IconButton name="close" size={26} onPress={onClose} />
+              style={{ paddingTop: insets.top + 8 }}
+            >
+              <IconButton name="back" size={26} onPress={onClose} />
               {title && (
                 <ThemedText
                   numberOfLines={1}
-                  className="flex-1 text-base font-semibold text-white">
+                  className="flex-1 text-base font-semibold text-white"
+                >
                   {title}
                 </ThemedText>
               )}
               {onToggleOrientation && (
-                <IconButton name="rotate" size={22} onPress={onToggleOrientation} />
+                <IconButton
+                  name="rotate"
+                  size={22}
+                  onPress={onToggleOrientation}
+                />
               )}
-              <IconButton name="captions" size={24} onPress={() => setSheet('cc')} />
-              <IconButton name="settings" size={22} onPress={() => setSheet('settings')} />
+              <IconButton
+                name="captions"
+                size={24}
+                onPress={() => setSheet("cc")}
+              />
+              <IconButton
+                name="settings"
+                size={22}
+                onPress={() => setSheet("settings")}
+              />
             </View>
 
             {/* Center transport: prev · play/pause · next */}
-            <View pointerEvents="box-none" className="flex-1 flex-row items-center justify-center gap-12">
+            <View
+              pointerEvents="box-none"
+              className="flex-1 flex-row items-center justify-center gap-12"
+            >
               {onPrev && (
-                <IconButton name="previous" size={30} onPress={onPrev} disabled={!hasPrev} />
+                <IconButton
+                  name="previous"
+                  size={30}
+                  onPress={onPrev}
+                  disabled={!hasPrev}
+                />
               )}
-              <Pressable onPress={togglePlay} hitSlop={16} className="active:opacity-70">
-                <Icon name={isPlaying ? 'pause' : 'play'} size={62} color="#ffffff" />
+              <Pressable
+                onPress={togglePlay}
+                hitSlop={16}
+                className="active:opacity-70"
+              >
+                <Icon
+                  name={isPlaying ? "pause" : "play"}
+                  size={62}
+                  color="#ffffff"
+                />
               </Pressable>
-              {onNext && <IconButton name="next" size={30} onPress={onNext} disabled={!hasNext} />}
+              {onNext && (
+                <IconButton
+                  name="next"
+                  size={30}
+                  onPress={onNext}
+                  disabled={!hasNext}
+                />
+              )}
             </View>
 
             {/* Bottom seek bar */}
-            <View pointerEvents="box-none" className="px-5" style={{ paddingBottom: insets.bottom + 16 }}>
+            <View
+              pointerEvents="box-none"
+              className="px-5"
+              style={{ paddingBottom: insets.bottom + 16 }}
+            >
               <SeekBar
                 progress={progress}
                 onSeek={seekToFraction}
@@ -382,7 +513,11 @@ export function VideoControls({
         </Animated.View>
       )}
 
-      <OptionsSheet player={player} mode={sheet} onClose={() => setSheet(null)} />
+      <OptionsSheet
+        player={player}
+        mode={sheet}
+        onClose={() => setSheet(null)}
+      />
     </View>
   );
 }

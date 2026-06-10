@@ -11,6 +11,7 @@
 import { Storage, StorageKeys } from '@/lib/storage';
 
 let brightness: number | null = null; // null = never set; leave system brightness alone
+let audioLanguage: string | null = null; // null = no saved preference (fall back to Hindi/default)
 let hydrated = false;
 
 export const playerPrefs = {
@@ -20,6 +21,25 @@ export const playerPrefs = {
     const stored = await Storage.getItem(StorageKeys.playerBrightness);
     const value = stored != null ? Number.parseFloat(stored) : NaN;
     if (Number.isFinite(value)) brightness = Math.max(0, Math.min(1, value));
+
+    const lang = await Storage.getItem(StorageKeys.playerAudioLanguage);
+    if (lang) audioLanguage = lang;
+  },
+
+  // The language (or label) of the audio track the user last chose. Applied to
+  // every video that has a matching track; persisted immediately on change
+  // since it's a discrete action, not a per-frame drag.
+  getAudioLanguage() {
+    return audioLanguage;
+  },
+
+  setAudioLanguage(lang: string | null) {
+    audioLanguage = lang || null;
+    if (audioLanguage) {
+      void Storage.setItem(StorageKeys.playerAudioLanguage, audioLanguage);
+    } else {
+      void Storage.removeItem(StorageKeys.playerAudioLanguage);
+    }
   },
 
   getBrightness() {
