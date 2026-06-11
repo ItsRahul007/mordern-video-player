@@ -76,18 +76,47 @@ function videosInAlbum(album: Album): Query {
     .orderBy({ key: AssetField.CREATION_TIME, ascending: false });
 }
 
-async function toVideoAsset(asset: Asset): Promise<VideoAsset> {
-  const info = await asset.getInfo();
-  return {
-    id: info.id,
-    uri: info.uri,
-    filename: info.filename,
-    duration: (info.duration ?? 0) / 1000,
-    width: info.width,
-    height: info.height,
-    creationTime: info.creationTime ?? 0,
-    size: fileSize(info.uri),
-  };
+async function toVideoAsset(asset: Asset): Promise<VideoAsset | null> {
+  try {
+    const info = await asset.getInfo();
+    return {
+      id: info.id,
+      uri: info.uri,
+      filename: info.filename,
+      duration: (info.duration ?? 0) / 1000,
+      width: info.width,
+      height: info.height,
+      creationTime: info.creationTime ?? 0,
+      size: fileSize(info.uri),
+    };
+  } catch {
+    // getInfo() rejects if the asset can't be fully read (e.g. an iCloud-only
+    // or momentarily unavailable file). Fall back to the basic getters so one
+    // bad asset doesn't blank the whole folder — a URI is enough to list and
+    // play it. Only drop the video if even the URI is unreadable.
+    try {
+      const uri = await asset.getUri();
+      const [filename, duration, width, height, creationTime] = await Promise.all([
+        asset.getFilename().catch(() => uri.split('/').pop() ?? 'Video'),
+        asset.getDuration().catch(() => 0),
+        asset.getWidth().catch(() => 0),
+        asset.getHeight().catch(() => 0),
+        asset.getCreationTime().catch(() => 0),
+      ]);
+      return {
+        id: asset.id,
+        uri,
+        filename,
+        duration: (duration ?? 0) / 1000,
+        width,
+        height,
+        creationTime: creationTime ?? 0,
+        size: fileSize(uri),
+      };
+    } catch {
+      return null;
+    }
+  }
 }
 
 /** All device albums that contain at least one video, sorted by video count. */
@@ -115,7 +144,10 @@ export async function getVideoFolders(): Promise<VideoFolder[]> {
 /** Ordered list of videos in a folder — also serves as the player's playlist. */
 export async function getFolderVideos(albumId: string): Promise<VideoAsset[]> {
   const assets = await videosInAlbum(new Album(albumId)).exe();
-  return Promise.all(assets.map(toVideoAsset));
+  const videos = await Promise.all(assets.map(toVideoAsset));
+  // Drop assets that couldn't be read at all (toVideoAsset never throws now,
+  // so one unreadable video can't reject the batch and empty the folder).
+  return videos.filter((v): v is VideoAsset => v !== null);
 }
 
 /** Delete videos from the device (the OS shows its own confirmation dialog). */

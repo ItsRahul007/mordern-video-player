@@ -4,6 +4,7 @@ import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { VideoThumbnail } from "@/components/video-thumbnail";
 import { usePlaybackEntry } from "@/hooks/use-playback";
+import { useTheme } from "@/hooks/use-theme";
 import { formatDuration } from "@/lib/format";
 import type { VideoAsset } from "@/lib/media";
 
@@ -22,6 +23,7 @@ export function VideoRow({
   selectionActive = false,
   selected = false,
 }: VideoRowProps) {
+  const { colors } = useTheme();
   const entry = usePlaybackEntry(video.id);
   const fraction = entry
     ? entry.completed
@@ -78,9 +80,11 @@ export function VideoRow({
 
       {selectionActive && (
         <View
-          className={`h-6 w-6 items-center justify-center rounded-full border-2 ${
-            selected ? "border-accent bg-accent" : "border-muted"
-          }`}
+          className="h-6 w-6 items-center justify-center rounded-full border-2"
+          style={{
+            borderColor: selected ? colors.accent : colors.textSecondary,
+            backgroundColor: selected ? colors.accent : "transparent",
+          }}
         >
           {selected && <Icon name="check" size={14} color="#ffffff" />}
         </View>

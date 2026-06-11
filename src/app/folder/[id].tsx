@@ -145,6 +145,9 @@ export default function FolderScreen() {
       <FlatList
         data={sortedVideos}
         keyExtractor={(item) => item.id}
+        // Re-render rows when the selection changes (otherwise the checkmark
+        // never updates, since the data array itself is unchanged).
+        extraData={selection.selectedIds}
         contentContainerClassName="gap-2.5 px-4 pb-28 pt-1"
         renderItem={({ item }) => (
           <VideoRow

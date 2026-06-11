@@ -7,9 +7,11 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
 import Animated, {
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
 } from "react-native-reanimated";
+import { scheduleOnRN } from "react-native-worklets";
 
 import { VideoControls } from "@/components/player/video-controls";
 import { ThemedText } from "@/components/themed-text";
@@ -77,6 +79,17 @@ export default function PlayerScreen() {
   const zoomStyle = useAnimatedStyle(() => ({
     transform: [{ scale: zoom.value }],
   }));
+  // A transform-based zoom only renders on Android over a TextureView, which is
+  // far more expensive than the default SurfaceView and makes playback stutter.
+  // Keep the smooth SurfaceView for normal 1x playback and switch to TextureView
+  // only while actually zoomed in.
+  const [zoomActive, setZoomActive] = useState(false);
+  useAnimatedReaction(
+    () => zoom.value > 1.001,
+    (active, prev) => {
+      if (active !== prev) scheduleOnRN(setZoomActive, active);
+    },
+  );
 
   const [trackedId, setTrackedId] = useState(current?.id);
   if (current?.id !== trackedId) {
@@ -250,7 +263,7 @@ export default function PlayerScreen() {
             contentFit="contain"
             nativeControls={false}
             allowsPictureInPicture
-            surfaceType="textureView"
+            surfaceType={zoomActive ? "textureView" : "surfaceView"}
           />
         </Animated.View>
       ) : (

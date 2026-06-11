@@ -129,6 +129,8 @@ export default function FoldersScreen() {
       <FlatList
         data={folders}
         keyExtractor={(item) => item.id}
+        // Re-render cards when the selection changes so the checkmark updates.
+        extraData={selection.selectedIds}
         ListHeaderComponent={header}
         contentContainerClassName="gap-2.5 px-4 pb-8"
         renderItem={({ item }) => (
