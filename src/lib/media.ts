@@ -167,6 +167,43 @@ export async function deleteFolders(ids: string[]): Promise<void> {
 }
 
 /**
+ * Fallback duration probe for videos whose media-library metadata reports 0
+ * (some files, especially recently copied or downloaded ones, aren't indexed
+ * with a duration yet). Spins up a temporary player and reads the duration the
+ * decoder reports once the source loads. Returns seconds, or null if it can't
+ * resolve within the timeout. The player is always released.
+ */
+export async function getVideoDuration(uri: string, timeoutMs = 8000): Promise<number | null> {
+  const player = createVideoPlayer(uri);
+  try {
+    return await new Promise<number | null>((resolve) => {
+      let settled = false;
+      const finish = (value: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        sub.remove();
+        resolve(value);
+      };
+
+      const timer = setTimeout(() => finish(null), timeoutMs);
+
+      // expo-video reports duration in seconds, available once the source loads.
+      const sub = player.addListener('sourceLoad', ({ duration }) => {
+        finish(duration && duration > 0 ? duration : null);
+      });
+
+      // It may already be loaded by the time we subscribe.
+      if (player.duration > 0) finish(player.duration);
+    });
+  } catch {
+    return null;
+  } finally {
+    player.release();
+  }
+}
+
+/**
  * Generate a single still frame for a video. Returns a native image reference
  * that expo-image can render directly. The temporary player is released after.
  */

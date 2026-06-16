@@ -51,6 +51,20 @@ function uniqueDownloadDir(baseName: string): string {
   return candidate;
 }
 
+/**
+ * Whether the Downloads folder is readable — a reliable proxy for all-files
+ * access. With the grant, `list()` returns the folder's full contents; without
+ * it, it returns nothing. (Downloads is realistically never empty, so a truly
+ * empty folder reading as "no access" is a tolerable, harmless edge case.)
+ */
+export function downloadsReadable(): boolean {
+  try {
+    return new Directory(`file://${DOWNLOADS_DIR}`).list().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** All `.zip` files in the Downloads folder, sorted A–Z. Returns [] if unreadable. */
 export function listZipFiles(): ZipFile[] {
   try {

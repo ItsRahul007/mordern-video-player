@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
 
 import { Icon } from "@/components/icon";
@@ -6,7 +7,31 @@ import { VideoThumbnail } from "@/components/video-thumbnail";
 import { usePlaybackEntry } from "@/hooks/use-playback";
 import { useTheme } from "@/hooks/use-theme";
 import { formatDuration } from "@/lib/format";
-import type { VideoAsset } from "@/lib/media";
+import { getVideoDuration, type VideoAsset } from "@/lib/media";
+
+/**
+ * Media-library metadata sometimes reports a 0 duration even though the file
+ * plays fine. When that happens, probe the actual file via expo-video as a
+ * fallback so the row still shows a real duration.
+ */
+function useResolvedDuration(video: VideoAsset): number {
+  const [duration, setDuration] = useState(video.duration);
+
+  useEffect(() => {
+    setDuration(video.duration);
+    if (video.duration > 0) return;
+
+    let active = true;
+    getVideoDuration(video.uri).then((resolved) => {
+      if (active && resolved) setDuration(resolved);
+    });
+    return () => {
+      active = false;
+    };
+  }, [video.id, video.uri, video.duration]);
+
+  return duration;
+}
 
 type VideoRowProps = {
   video: VideoAsset;
@@ -25,10 +50,11 @@ export function VideoRow({
 }: VideoRowProps) {
   const { colors } = useTheme();
   const entry = usePlaybackEntry(video.id);
+  const duration = useResolvedDuration(video);
   const fraction = entry
     ? entry.completed
       ? 1
-      : Math.min(1, Math.max(0, entry.position / (video.duration || 1)))
+      : Math.min(1, Math.max(0, entry.position / (duration || 1)))
     : 0;
 
   const completedPercent = Math.round(fraction * 100);
@@ -53,7 +79,7 @@ export function VideoRow({
 
         <View className="absolute bottom-1 right-1 rounded bg-black/65 px-1 py-0.5">
           <ThemedText className="text-sm font-semibold text-white">
-            {formatDuration(video.duration)}
+            {formatDuration(duration)}
           </ThemedText>
         </View>
 

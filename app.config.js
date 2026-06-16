@@ -61,6 +61,13 @@ module.exports = {
           supportsPictureInPicture: true,
         },
       ],
+      [
+        "expo-file-system",
+        {
+          supportsOpeningDocumentsInPlace: true,
+          enableFileSharing: true,
+        },
+      ],
       "expo-sqlite",
       [
         "expo-media-library",
