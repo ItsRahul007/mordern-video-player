@@ -27,6 +27,7 @@ function RootNavigator() {
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="index" />
         <Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="archives" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="folder/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen
           name="player"

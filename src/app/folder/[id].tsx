@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { ConfirmSheet } from "@/components/confirm-sheet";
 import { Icon } from "@/components/icon";
 import { SortOptionsList } from "@/components/sort-options-list";
 import { ThemedText } from "@/components/themed-text";
@@ -30,6 +31,7 @@ export default function FolderScreen() {
   const { sort, setSort } = useSort();
   const { data: videos, isLoading } = useFolderVideos(id);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const selection = useSelection();
   const entries = usePlaybackEntries();
 
@@ -77,6 +79,7 @@ export default function FolderScreen() {
   };
 
   const confirmDelete = async () => {
+    setConfirmOpen(false);
     try {
       await deleteVideos([...selection.selectedIds]);
       selection.clear();
@@ -113,7 +116,7 @@ export default function FolderScreen() {
             {selection.count} selected
           </ThemedText>
           <Pressable
-            onPress={confirmDelete}
+            onPress={() => setConfirmOpen(true)}
             hitSlop={10}
             className="p-2 active:opacity-70"
           >
@@ -219,6 +222,16 @@ export default function FolderScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <ConfirmSheet
+        visible={confirmOpen}
+        title={`Delete ${selection.count} video${selection.count === 1 ? "" : "s"}?`}
+        message="The selected videos will be permanently deleted from this device."
+        confirmLabel="Delete"
+        destructive
+        onConfirm={confirmDelete}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </SafeAreaView>
   );
 }
