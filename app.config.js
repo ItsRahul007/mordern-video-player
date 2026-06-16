@@ -78,6 +78,7 @@ module.exports = {
         },
       ],
       "./plugins/with-single-abi.js",
+      "./plugins/with-gradle-memory.js",
     ],
     experiments: {
       typedRoutes: true,
