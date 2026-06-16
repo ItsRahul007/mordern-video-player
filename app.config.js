@@ -4,7 +4,7 @@ module.exports = {
   expo: {
     name: IS_DEV ? "VP (Dev)" : "Video Player",
     slug: "video-player",
-    version: "1.0.1",
+    version: "1.0.2",
     orientation: "default",
     icon: "./assets/images/app-logo.png",
     scheme: "mordernvideoplayer",

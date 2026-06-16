@@ -92,7 +92,6 @@ export default function ArchivesScreen() {
     try {
       console.warn("[archives] extract start:", zip.name);
       const dest = await extractZip(zip, (fraction) => {
-        console.warn("[archives] progress:", fraction);
         setProgress((p) => ({ ...p, [zip.uri]: fraction }));
       });
       console.warn("[archives] extract OK ->", dest);
