@@ -20,14 +20,12 @@ import { ThemedText } from "@/components/themed-text";
 import { ZipRow } from "@/components/zip-row";
 import { archiveKeys, useZipFiles } from "@/hooks/use-archives";
 import { useSelection } from "@/hooks/use-selection";
-import { useAllFilesAccess } from "@/hooks/use-storage-permission";
-import { useTheme } from "@/hooks/use-theme";
 import {
-  deleteZip,
-  downloadsReadable,
-  extractZip,
-  type ZipFile,
-} from "@/lib/archives";
+  hasAllFilesAccess,
+  useAllFilesAccess,
+} from "@/hooks/use-storage-permission";
+import { useTheme } from "@/hooks/use-theme";
+import { deleteZip, extractZip, type ZipFile } from "@/lib/archives";
 
 /** Which confirmation sheet is currently open (none when null). */
 type Dialog =
@@ -51,11 +49,10 @@ export default function ArchivesScreen() {
   // Per-archive extraction progress (0–1), keyed by URI.
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [dialog, setDialog] = useState<Dialog | null>(null);
-  // Whether Downloads is readable (proxy for all-files access). Drives whether
-  // an empty list offers a "grant access" button or just says "no zips".
-  const [readable, setReadable] = useState<boolean>(() =>
-    Platform.OS === "android" ? downloadsReadable() : false,
-  );
+  // Whether all-files access is granted (read from the OS, not inferred from a
+  // listing). Drives whether an empty list offers a "grant access" button or
+  // just says "no zips".
+  const [hasAccess, setHasAccess] = useState<boolean>(hasAllFilesAccess);
 
   // Hardware back exits selection mode first (before leaving the screen).
   const { active: selectionActive, clear: clearSelection } = selection;
@@ -75,12 +72,13 @@ export default function ArchivesScreen() {
   const refreshList = () =>
     queryClient.invalidateQueries({ queryKey: archiveKeys.zips });
 
-  // Re-list when the app returns to the foreground — e.g. after the user grants
-  // all-files access in system settings (which runs in a separate activity).
+  // Re-check access and re-list when the app returns to the foreground — e.g.
+  // after the user grants all-files access in system settings (which runs in a
+  // separate activity).
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active") {
-        setReadable(downloadsReadable());
+        setHasAccess(hasAllFilesAccess());
         void refetch();
       }
     });
@@ -263,7 +261,7 @@ export default function ArchivesScreen() {
             <View className="mt-24 items-center">
               <ActivityIndicator color={colors.textSecondary} />
             </View>
-          ) : readable ? (
+          ) : hasAccess ? (
             // Access is granted — the folder simply has no zips.
             <View className="mt-24 items-center gap-3 px-8">
               <Icon name="archive" size={48} color={colors.textSecondary} />
