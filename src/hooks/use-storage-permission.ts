@@ -3,12 +3,23 @@ import { ActivityAction, startActivityAsync } from 'expo-intent-launcher';
 import { useCallback } from 'react';
 import { Platform } from 'react-native';
 
+import { isAllFilesAccessGranted } from '@modules/all-files-access';
+
+/**
+ * Reads the real MANAGE_EXTERNAL_STORAGE grant state. Unlike inferring from a
+ * directory listing (which the app can do via its scoped media permissions even
+ * without the grant), this reflects the actual OS toggle. `true` on platforms
+ * without the concept (iOS, Android ≤10).
+ */
+export function hasAllFilesAccess(): boolean {
+  return isAllFilesAccessGranted();
+}
+
 /**
  * Opens the Android "All files access" (MANAGE_EXTERNAL_STORAGE) settings page.
  *
- * There's no JS API to read the grant state, and expo-file-system's own
- * listing is the real source of truth for the archives screen — so this hook
- * only handles *opening* the settings page. The screen re-lists on foreground.
+ * The screen re-checks the grant on foreground (the toggle lives in a separate
+ * system activity), so this hook only handles *opening* the settings page.
  */
 export function useAllFilesAccess() {
   const openSettings = useCallback(async () => {
