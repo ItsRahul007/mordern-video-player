@@ -29,6 +29,10 @@ module.exports = {
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.READ_MEDIA_AUDIO",
+        // All-files access — needed to scan Downloads for .zip archives, which
+        // the scoped READ_MEDIA_* permissions can't see. Granted via system
+        // settings (see use-storage-permission.ts).
+        "android.permission.MANAGE_EXTERNAL_STORAGE",
       ],
       package: IS_DEV
         ? "com.rahulghosh.vplayer"
@@ -55,6 +59,13 @@ module.exports = {
         {
           supportsBackgroundPlayback: false,
           supportsPictureInPicture: true,
+        },
+      ],
+      [
+        "expo-file-system",
+        {
+          supportsOpeningDocumentsInPlace: true,
+          enableFileSharing: true,
         },
       ],
       "expo-sqlite",

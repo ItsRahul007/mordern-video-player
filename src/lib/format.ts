@@ -13,3 +13,15 @@ export function formatDuration(totalSeconds: number): string {
   }
   return `${minutes}:${ss}`;
 }
+
+/** Format a byte count as a human-readable size (e.g. `1.4 GB`). */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return '0 B';
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** exponent;
+  // No decimals for plain bytes; one decimal for larger units.
+  const formatted = exponent === 0 ? value.toString() : value.toFixed(1);
+  return `${formatted} ${units[exponent]}`;
+}

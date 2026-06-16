@@ -1,16 +1,18 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   BackHandler,
   FlatList,
+  Platform,
   Pressable,
   RefreshControl,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { ConfirmSheet } from "@/components/confirm-sheet";
 import { FolderCard } from "@/components/folder-card";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
@@ -24,7 +26,7 @@ export default function FoldersScreen() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { colors } = useTheme();
-  const { granted, canAskAgain, requestPermission } = useMediaPermissions();
+  const { granted, requestPermission } = useMediaPermissions();
   const {
     data: folders,
     isLoading,
@@ -32,6 +34,7 @@ export default function FoldersScreen() {
     refetch,
   } = useVideoFolders(granted);
   const selection = useSelection();
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Hardware back exits folder-selection mode first.
   const { active: selectionActive, clear: clearSelection } = selection;
@@ -49,6 +52,7 @@ export default function FoldersScreen() {
   );
 
   const confirmDelete = async () => {
+    setConfirmOpen(false);
     try {
       await deleteFolders([...selection.selectedIds]);
       selection.clear();
@@ -71,7 +75,7 @@ export default function FoldersScreen() {
         {selection.count} selected
       </ThemedText>
       <Pressable
-        onPress={confirmDelete}
+        onPress={() => setConfirmOpen(true)}
         hitSlop={10}
         className="p-2 active:opacity-70"
       >
@@ -88,13 +92,25 @@ export default function FoldersScreen() {
             : "Your videos"}
         </ThemedText>
       </View>
-      <Pressable
-        onPress={() => router.push("/settings")}
-        hitSlop={10}
-        className="mt-1 p-1 active:opacity-70"
-      >
-        <Icon name="settings" size={24} color={colors.text} />
-      </Pressable>
+      <View className="mt-1 flex-row items-center gap-1 gap-x-2">
+        {/* Zip files live in shared storage; only reachable on Android. */}
+        {Platform.OS === "android" && (
+          <Pressable
+            onPress={() => router.push("/archives")}
+            hitSlop={10}
+            className="p-1 active:opacity-70"
+          >
+            <Icon name="archive" size={24} color={colors.text} />
+          </Pressable>
+        )}
+        <Pressable
+          onPress={() => router.push("/settings")}
+          hitSlop={10}
+          className="p-1 active:opacity-70"
+        >
+          <Icon name="settings" size={24} color={colors.text} />
+        </Pressable>
+      </View>
     </View>
   );
 
@@ -116,7 +132,7 @@ export default function FoldersScreen() {
             className="mt-2 rounded-full bg-accent px-6 py-3 active:opacity-80"
           >
             <ThemedText className="font-semibold text-accent-foreground">
-              {canAskAgain ? "Grant access" : "Open settings"}
+              Grant access
             </ThemedText>
           </Pressable>
         </View>
@@ -172,6 +188,16 @@ export default function FoldersScreen() {
             </View>
           )
         }
+      />
+
+      <ConfirmSheet
+        visible={confirmOpen}
+        title={`Delete ${selection.count} folder${selection.count === 1 ? "" : "s"}?`}
+        message="The videos in the selected folders will be permanently deleted from this device."
+        confirmLabel="Delete"
+        destructive
+        onConfirm={confirmDelete}
+        onCancel={() => setConfirmOpen(false)}
       />
     </SafeAreaView>
   );

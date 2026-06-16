@@ -34,6 +34,8 @@ const ICONS = {
   rotate: { ios: 'rotate.right', android: 'screen_rotation', web: 'screen_rotation' },
   trash: { ios: 'trash', android: 'delete', web: 'delete' },
   xmark: { ios: 'xmark', android: 'close', web: 'close' },
+  archive: { ios: 'doc.zipper', android: 'folder_zip', web: 'folder_zip' },
+  unarchive: { ios: 'arrow.down.doc', android: 'unarchive', web: 'unarchive' },
 } as const;
 
 export type IconName = keyof typeof ICONS;
