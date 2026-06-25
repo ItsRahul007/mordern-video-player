@@ -101,7 +101,7 @@ export default function FoldersScreen() {
               hitSlop={10}
               className="p-1 active:opacity-70"
             >
-              <Icon name="status" size={24} color={colors.text} />
+              <Icon name="whatsapp" size={24} color={colors.text} />
             </Pressable>
             <Pressable
               onPress={() => router.push("/archives")}

@@ -1,5 +1,14 @@
+import { FontAwesome } from '@expo/vector-icons';
 import { SymbolView } from 'expo-symbols';
 import type { ColorValue } from 'react-native';
+
+/**
+ * Brand logos (e.g. WhatsApp) aren't part of SF Symbols or Material Symbols,
+ * so they're rendered from FontAwesome's brand glyphs instead of `SymbolView`.
+ */
+const BRAND_ICONS = {
+  whatsapp: 'whatsapp',
+} as const;
 
 /**
  * Cross-platform icon wrapper. `SymbolView` only renders SF Symbols on iOS;
@@ -42,7 +51,7 @@ const ICONS = {
   image: { ios: 'photo', android: 'image', web: 'image' },
 } as const;
 
-export type IconName = keyof typeof ICONS;
+export type IconName = keyof typeof ICONS | keyof typeof BRAND_ICONS;
 
 type IconProps = {
   name: IconName;
@@ -51,5 +60,14 @@ type IconProps = {
 };
 
 export function Icon({ name, size = 24, color }: IconProps) {
-  return <SymbolView name={ICONS[name]} size={size} tintColor={color} />;
+  if (name in BRAND_ICONS) {
+    return (
+      <FontAwesome
+        name={BRAND_ICONS[name as keyof typeof BRAND_ICONS]}
+        size={size}
+        color={color}
+      />
+    );
+  }
+  return <SymbolView name={ICONS[name as keyof typeof ICONS]} size={size} tintColor={color} />;
 }
