@@ -43,7 +43,7 @@ export default function ArchivesScreen() {
     isLoading,
     isRefetching,
     refetch,
-  } = useZipFiles(Platform.OS === "android");
+  } = useZipFiles(Platform.OS !== "web");
   const selection = useSelection();
 
   // Per-archive extraction progress (0–1), keyed by URI.
