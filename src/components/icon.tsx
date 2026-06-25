@@ -36,6 +36,10 @@ const ICONS = {
   xmark: { ios: 'xmark', android: 'close', web: 'close' },
   archive: { ios: 'doc.zipper', android: 'folder_zip', web: 'folder_zip' },
   unarchive: { ios: 'arrow.down.doc', android: 'unarchive', web: 'unarchive' },
+  status: { ios: 'circle.dashed', android: 'motion_photos_on', web: 'motion_photos_on' },
+  save: { ios: 'arrow.down.circle', android: 'download', web: 'download' },
+  playCircle: { ios: 'play.circle.fill', android: 'play_circle', web: 'play_circle' },
+  image: { ios: 'photo', android: 'image', web: 'image' },
 } as const;
 
 export type IconName = keyof typeof ICONS;

@@ -93,15 +93,24 @@ export default function FoldersScreen() {
         </ThemedText>
       </View>
       <View className="mt-1 flex-row items-center gap-1 gap-x-2">
-        {/* Zip files live in shared storage; only reachable on Android. */}
+        {/* WhatsApp statuses + zip files live in shared storage; Android only. */}
         {Platform.OS === "android" && (
-          <Pressable
-            onPress={() => router.push("/archives")}
-            hitSlop={10}
-            className="p-1 active:opacity-70"
-          >
-            <Icon name="archive" size={24} color={colors.text} />
-          </Pressable>
+          <>
+            <Pressable
+              onPress={() => router.push("/status-saver")}
+              hitSlop={10}
+              className="p-1 active:opacity-70"
+            >
+              <Icon name="status" size={24} color={colors.text} />
+            </Pressable>
+            <Pressable
+              onPress={() => router.push("/archives")}
+              hitSlop={10}
+              className="p-1 active:opacity-70"
+            >
+              <Icon name="archive" size={24} color={colors.text} />
+            </Pressable>
+          </>
         )}
         <Pressable
           onPress={() => router.push("/settings")}

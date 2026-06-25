@@ -7,7 +7,10 @@ import { Platform } from "react-native";
  * instead of throwing at import time.
  */
 const native = Platform.OS === "android"
-  ? requireOptionalNativeModule<{ isGranted(): boolean }>("AllFilesAccess")
+  ? requireOptionalNativeModule<{
+      isGranted(): boolean;
+      copyToPublicDir(from: string, to: string): Promise<string>;
+    }>("AllFilesAccess")
   : null;
 
 /**
@@ -17,4 +20,15 @@ const native = Platform.OS === "android"
  */
 export function isAllFilesAccessGranted(): boolean {
   return native?.isGranted() ?? true;
+}
+
+/**
+ * Copy a file into Android shared storage via raw java.io (honours the
+ * all-files grant where expo-file-system refuses). `from`/`to` are raw absolute
+ * paths — no `file://` scheme, already decoded. Returns the destination path.
+ * Android-only.
+ */
+export async function copyToPublicDir(from: string, to: string): Promise<string> {
+  if (!native) throw new Error("copyToPublicDir is only available on Android");
+  return native.copyToPublicDir(from, to);
 }
