@@ -157,7 +157,7 @@ export default function FoldersScreen() {
         // Re-render cards when the selection changes so the checkmark updates.
         extraData={selection.selectedIds}
         ListHeaderComponent={header}
-        contentContainerClassName="gap-2.5 px-4 pb-8"
+        contentContainerClassName="gap-1.5 px-4 pb-8"
         renderItem={({ item }) => (
           <FolderCard
             folder={item}

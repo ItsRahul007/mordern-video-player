@@ -151,7 +151,7 @@ export default function FolderScreen() {
         // Re-render rows when the selection changes (otherwise the checkmark
         // never updates, since the data array itself is unchanged).
         extraData={selection.selectedIds}
-        contentContainerClassName="gap-2.5 px-4 pb-28 pt-1"
+        contentContainerClassName="gap-1.5 px-4 pb-28 pt-1"
         renderItem={({ item }) => (
           <VideoRow
             video={item}
@@ -204,14 +204,25 @@ export default function FolderScreen() {
         >
           <Pressable
             onPress={(e) => e.stopPropagation()}
-            className="rounded-t-3xl bg-background px-4 pb-10 pt-3"
+            className="rounded-t-3xl px-2 pb-10 pt-3"
+            style={{ backgroundColor: colors.background }}
           >
-            <View className="mb-3 items-center">
-              <View className="h-1 w-10 rounded-full bg-surface-2" />
+            <View className="mb-4 items-center">
+              <View
+                className="h-1 w-10 rounded-full"
+                style={{ backgroundColor: colors.backgroundSelected }}
+              />
             </View>
-            <ThemedText type="subtitle" className="mb-3 px-1">
-              Sort by
-            </ThemedText>
+            <View className="mb-4 flex-row items-center justify-between px-1">
+              <ThemedText type="subtitle">Sort by</ThemedText>
+              <Pressable
+                onPress={() => setFilterOpen(false)}
+                hitSlop={10}
+                className="active:opacity-70"
+              >
+                <Icon name="xmark" size={20} color={colors.textSecondary} />
+              </Pressable>
+            </View>
             <SortOptionsList
               value={sort}
               onChange={(option) => {

@@ -23,19 +23,26 @@ export function SortOptionsList({ value, onChange }: SortOptionsListProps) {
   const { colors } = useTheme();
 
   return (
-    <View className="overflow-hidden rounded-2xl bg-white dark:bg-black">
+    <View className="overflow-hidden rounded-2xl">
       {SORT_OPTIONS.map((option, index) => {
         const active = value === option.value;
+        const isLast = index === SORT_OPTIONS.length - 1;
         return (
           <Pressable
             key={option.value}
             onPress={() => onChange(option.value)}
-            className={`flex-row items-center justify-between px-4 py-3.5 active:opacity-70`}
+            style={
+              active ? { backgroundColor: colors.accent + "18" } : undefined
+            }
+            className="flex-row items-center justify-between px-5 py-3.5 active:opacity-70"
           >
-            <ThemedText className={active ? "font-semibold text-accent" : ""}>
+            <ThemedText
+              className={active ? "text-[15px] font-semibold" : "text-[15px]"}
+              style={active ? { color: colors.accent } : undefined}
+            >
               {option.label}
             </ThemedText>
-            {active && <Icon name="check" size={20} color={colors.accent} />}
+            {active && <Icon name="check" size={18} color={colors.accent} />}
           </Pressable>
         );
       })}
