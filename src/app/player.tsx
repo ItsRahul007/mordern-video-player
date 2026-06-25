@@ -4,13 +4,14 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
 import Animated, {
   useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
 } from "react-native-reanimated";
+import { VolumeManager } from "react-native-volume-manager";
 import { scheduleOnRN } from "react-native-worklets";
 
 import { VideoControls } from "@/components/player/video-controls";
@@ -119,6 +120,31 @@ export default function PlayerScreen() {
   // The status bar (clock, battery, notifications) follows the player controls:
   // visible while the overlay is up, hidden when it auto-hides.
   const [controlsVisible, setControlsVisible] = useState(true);
+
+  // Suppress the system volume UI while the player is active so hardware
+  // volume buttons trigger the in-player indicator instead.
+  const [hwVolume, setHwVolume] = useState<number | null>(null);
+  const hwVolumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showHwVolume = useCallback((vol: number) => {
+    setHwVolume(vol);
+    if (hwVolumeTimer.current) clearTimeout(hwVolumeTimer.current);
+    hwVolumeTimer.current = setTimeout(() => setHwVolume(null), 1200);
+  }, []);
+
+  useEffect(() => {
+    VolumeManager.showNativeVolumeUI({ enabled: false });
+
+    const listener = VolumeManager.addVolumeListener((result) => {
+      showHwVolume(result.volume);
+    });
+
+    return () => {
+      listener.remove();
+      VolumeManager.showNativeVolumeUI({ enabled: true });
+      if (hwVolumeTimer.current) clearTimeout(hwVolumeTimer.current);
+    };
+  }, [showHwVolume]);
 
   // Apply the saved brightness on open; normalize (hand back to the system)
   // when leaving the player. The chosen value stays persisted for next time.
@@ -291,6 +317,7 @@ export default function PlayerScreen() {
           onToggleOrientation={toggleOrientation}
           onVisibilityChange={setControlsVisible}
           zoom={zoom}
+          hardwareVolume={hwVolume}
         />
       )}
     </View>

@@ -43,6 +43,9 @@ type VideoControlsProps = {
   onVisibilityChange?: (visible: boolean) => void;
   /** Pinch-to-zoom scale, owned by the player (1 = fit, 2 = 200% max). */
   zoom?: SharedValue<number>;
+  /** When non-null the hardware volume buttons changed the level; show the
+   *  custom volume indicator instead of the system overlay. */
+  hardwareVolume?: number | null;
 };
 
 const HIDE_DELAY = 3500;
@@ -96,6 +99,7 @@ export function VideoControls({
   onToggleOrientation,
   onVisibilityChange,
   zoom,
+  hardwareVolume,
 }: VideoControlsProps) {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
@@ -125,6 +129,21 @@ export function VideoControls({
   useEffect(() => {
     onVisibilityChange?.(visible);
   }, [visible, onVisibilityChange]);
+
+  // Show the custom volume indicator when the hardware volume buttons are
+  // pressed (the parent suppresses the system volume overlay and passes the
+  // new level here). A null value means the feedback should be cleared.
+  useEffect(() => {
+    if (hardwareVolume != null) {
+      setVerticalFeedback({ type: "volume", value: hardwareVolume });
+    } else {
+      // Only clear if the current feedback is a volume indicator (don't clobber
+      // an active brightness swipe).
+      setVerticalFeedback((prev) =>
+        prev?.type === "volume" ? null : prev,
+      );
+    }
+  }, [hardwareVolume]);
 
   // Auto-hide while playing and not scrubbing. Re-runs (and resets the timer)
   // whenever visibility/playback/scrubbing changes.
@@ -379,7 +398,9 @@ export function VideoControls({
 
       {/* Volume / brightness vertical-drag indicator. */}
       {verticalFeedback && (
-        <View
+        <Animated.View
+          entering={FadeIn.duration(150)}
+          exiting={FadeOut.duration(300)}
           pointerEvents="none"
           style={StyleSheet.absoluteFill}
           className="items-center justify-center"
@@ -402,7 +423,7 @@ export function VideoControls({
               {Math.round(verticalFeedback.value * 100)}%
             </ThemedText>
           </View>
-        </View>
+        </Animated.View>
       )}
 
       {visible && (
