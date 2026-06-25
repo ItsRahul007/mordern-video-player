@@ -6,6 +6,7 @@
  * https://docs.expo.dev/versions/v56.0.0/sdk/media-library/
  */
 import { File } from 'expo-file-system';
+import { deleteAsync, getInfoAsync, readDirectoryAsync } from 'expo-file-system/legacy';
 import { Album, Asset, AssetField, MediaType, Query } from 'expo-media-library';
 import { createVideoPlayer, type VideoThumbnail } from 'expo-video';
 
@@ -156,14 +157,114 @@ export async function deleteVideos(ids: string[]): Promise<void> {
   await Asset.delete(ids.map((id) => new Asset(id)));
 }
 
-/** Delete whole folders and their videos. */
+/** The directory URI and the filenames of the album's videos inside it. */
+type FolderProbe = { dirUri: string; videoNames: Set<string> };
+
+/** Decode a single URI path segment (filename), tolerating malformed escapes. */
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/**
+ * Inspect an album's on-disk folders and return those that hold *nothing but*
+ * the album's videos — i.e. would be left empty once the videos are gone. A
+ * folder is skipped if it contains any other file or a subdirectory, so we
+ * never remove a directory the user keeps other things in. Returns an empty
+ * array when the paths can't be read (e.g. iOS ph:// URIs).
+ *
+ * Uses the legacy file-system API on purpose: the new File/Directory API parses
+ * paths with `java.net.URI`, which throws on characters like `[` `]` that media
+ * filenames often contain. The legacy API parses with the lenient `Uri.parse`.
+ */
+async function emptyableFolders(albumId: string): Promise<string[]> {
+  try {
+    const assets = await videosInAlbum(new Album(albumId)).exe();
+    const uris = await Promise.all(assets.map((a) => a.getUri().catch(() => null)));
+    const fileUris = uris.filter((u): u is string => !!u && u.startsWith('file://'));
+    console.log(
+      `[deleteFolders] album ${albumId}: ${assets.length} videos, ${fileUris.length} file:// URIs`,
+    );
+    if (fileUris.length === 0) return [];
+
+    // Group the album's videos by their parent directory (by filename).
+    const probes = new Map<string, FolderProbe>();
+    for (const uri of fileUris) {
+      const slash = uri.lastIndexOf('/');
+      if (slash < 0) continue;
+      const dirUri = uri.slice(0, slash);
+      const name = decodeSegment(uri.slice(slash + 1));
+      const probe = probes.get(dirUri) ?? { dirUri, videoNames: new Set<string>() };
+      probe.videoNames.add(name);
+      probes.set(dirUri, probe);
+    }
+
+    const emptyable: string[] = [];
+    for (const { dirUri, videoNames } of probes.values()) {
+      try {
+        // readDirectoryAsync returns decoded names of files *and* subdirectories.
+        const entries = await readDirectoryAsync(dirUri);
+        const extras = entries.filter((name) => !videoNames.has(name));
+        if (extras.length === 0) {
+          console.log(`[deleteFolders] ${dirUri}: only videos → will remove folder`);
+          emptyable.push(dirUri);
+        } else {
+          console.log(
+            `[deleteFolders] ${dirUri}: ${extras.length} extra entr${
+              extras.length === 1 ? 'y' : 'ies'
+            } (${extras.join(', ')}) → keeping folder`,
+          );
+        }
+      } catch (err) {
+        // Couldn't read the directory — leave it in place.
+        console.warn(`[deleteFolders] failed to list ${dirUri}:`, err);
+      }
+    }
+    return emptyable;
+  } catch (err) {
+    console.warn(`[deleteFolders] failed to inspect album ${albumId}:`, err);
+    return [];
+  }
+}
+
+/**
+ * Delete whole folders and their videos. The check runs *before* deleting: any
+ * folder that holds only the videos being removed is deleted from disk too,
+ * while folders that contain other files are left in place.
+ */
 export async function deleteFolders(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
+  console.log(`[deleteFolders] deleting ${ids.length} folder(s):`, ids);
+
+  // Check on-disk contents first, while the videos still exist.
+  const toRemove = (await Promise.all(ids.map(emptyableFolders))).flat();
+  console.log(`[deleteFolders] ${toRemove.length} folder(s) will be removed from disk`);
+
   // Android always removes the album's assets; `true` makes iOS do so too.
   await Album.delete(
     ids.map((id) => new Album(id)),
     true,
   );
+  console.log('[deleteFolders] album assets deleted');
+
+  // Now that the videos are gone, remove the directories that are left empty.
+  for (const dirUri of toRemove) {
+    try {
+      const info = await getInfoAsync(dirUri);
+      if (info.exists) {
+        await deleteAsync(dirUri, { idempotent: true });
+        console.log(`[deleteFolders] removed folder ${dirUri}`);
+      } else {
+        console.log(`[deleteFolders] folder already gone ${dirUri}`);
+      }
+    } catch (err) {
+      // Best-effort cleanup; the videos were already deleted successfully.
+      console.warn(`[deleteFolders] failed to remove folder ${dirUri}:`, err);
+    }
+  }
 }
 
 /**
