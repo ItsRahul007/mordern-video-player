@@ -1,3 +1,4 @@
+import Constants from "expo-constants";
 import { useRouter } from "expo-router";
 import { Pressable, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -86,7 +87,7 @@ export default function SettingsScreen() {
           </View>
           <View className="flex-row items-center justify-between py-1">
             <ThemedText>Version</ThemedText>
-            <ThemedText type="muted">1.0.1</ThemedText>
+            <ThemedText type="muted">{Constants.expoConfig?.version}</ThemedText>
           </View>
         </View>
       </View>

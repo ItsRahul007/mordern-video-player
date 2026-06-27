@@ -1,10 +1,11 @@
 const IS_DEV = process.env.APP_VARIANT === "development";
+const { version } = require("./package.json");
 
 module.exports = {
   expo: {
     name: IS_DEV ? "VP (Dev)" : "Video Player",
     slug: "video-player",
-    version: "1.0.3+1",
+    version,
     orientation: "default",
     icon: "./assets/images/app-logo.png",
     scheme: "mordernvideoplayer",
