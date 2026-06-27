@@ -5,10 +5,14 @@
  * milliseconds; we normalize to seconds here.
  * https://docs.expo.dev/versions/v56.0.0/sdk/media-library/
  */
-import { File } from 'expo-file-system';
-import { deleteAsync, getInfoAsync, readDirectoryAsync } from 'expo-file-system/legacy';
-import { Album, Asset, AssetField, MediaType, Query } from 'expo-media-library';
-import { createVideoPlayer, type VideoThumbnail } from 'expo-video';
+import { File } from "expo-file-system";
+import {
+  deleteAsync,
+  getInfoAsync,
+  readDirectoryAsync,
+} from "expo-file-system/legacy";
+import { Album, Asset, AssetField, MediaType, Query } from "expo-media-library";
+import { createVideoPlayer, type VideoThumbnail } from "expo-video";
 
 export type VideoAsset = {
   id: string;
@@ -26,14 +30,14 @@ export type VideoAsset = {
 
 /** How a folder's videos are ordered. Shared by Settings and the folder filter. */
 export type SortOption =
-  | 'name-asc'
-  | 'name-desc'
-  | 'date-desc'
-  | 'date-asc'
-  | 'size-desc'
-  | 'size-asc';
+  | "name-asc"
+  | "name-desc"
+  | "date-desc"
+  | "date-asc"
+  | "size-desc"
+  | "size-asc";
 
-export const DEFAULT_SORT: SortOption = 'date-desc';
+export const DEFAULT_SORT: SortOption = "date-desc";
 
 function fileSize(uri: string): number | null {
   try {
@@ -44,20 +48,23 @@ function fileSize(uri: string): number | null {
 }
 
 /** Order a list of videos by the chosen option (media-library can't sort by name/size). */
-export function sortVideos(videos: VideoAsset[], option: SortOption): VideoAsset[] {
+export function sortVideos(
+  videos: VideoAsset[],
+  option: SortOption,
+): VideoAsset[] {
   const sorted = [...videos];
   switch (option) {
-    case 'name-asc':
+    case "name-asc":
       return sorted.sort((a, b) => a.filename.localeCompare(b.filename));
-    case 'name-desc':
+    case "name-desc":
       return sorted.sort((a, b) => b.filename.localeCompare(a.filename));
-    case 'date-asc':
+    case "date-asc":
       return sorted.sort((a, b) => a.creationTime - b.creationTime);
-    case 'date-desc':
+    case "date-desc":
       return sorted.sort((a, b) => b.creationTime - a.creationTime);
-    case 'size-asc':
+    case "size-asc":
       return sorted.sort((a, b) => (a.size ?? 0) - (b.size ?? 0));
-    case 'size-desc':
+    case "size-desc":
       return sorted.sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
   }
 }
@@ -97,13 +104,14 @@ async function toVideoAsset(asset: Asset): Promise<VideoAsset | null> {
     // play it. Only drop the video if even the URI is unreadable.
     try {
       const uri = await asset.getUri();
-      const [filename, duration, width, height, creationTime] = await Promise.all([
-        asset.getFilename().catch(() => uri.split('/').pop() ?? 'Video'),
-        asset.getDuration().catch(() => 0),
-        asset.getWidth().catch(() => 0),
-        asset.getHeight().catch(() => 0),
-        asset.getCreationTime().catch(() => 0),
-      ]);
+      const [filename, duration, width, height, creationTime] =
+        await Promise.all([
+          asset.getFilename().catch(() => uri.split("/").pop() ?? "Video"),
+          asset.getDuration().catch(() => 0),
+          asset.getWidth().catch(() => 0),
+          asset.getHeight().catch(() => 0),
+          asset.getCreationTime().catch(() => 0),
+        ]);
       return {
         id: asset.id,
         uri,
@@ -187,8 +195,12 @@ async function planAlbumDeletion(albumId: string): Promise<AlbumPlan> {
   try {
     const assets = await videosInAlbum(new Album(albumId)).exe();
     const assetIds = assets.map((a) => a.id);
-    const uris = await Promise.all(assets.map((a) => a.getUri().catch(() => null)));
-    const fileUris = uris.filter((u): u is string => !!u && u.startsWith('file://'));
+    const uris = await Promise.all(
+      assets.map((a) => a.getUri().catch(() => null)),
+    );
+    const fileUris = uris.filter(
+      (u): u is string => !!u && u.startsWith("file://"),
+    );
     console.log(
       `[deleteFolders] album ${albumId}: ${assets.length} videos, ${fileUris.length} file:// URIs`,
     );
@@ -197,11 +209,14 @@ async function planAlbumDeletion(albumId: string): Promise<AlbumPlan> {
     // Group the album's videos by their parent directory (by filename).
     const probes = new Map<string, FolderProbe>();
     for (const uri of fileUris) {
-      const slash = uri.lastIndexOf('/');
+      const slash = uri.lastIndexOf("/");
       if (slash < 0) continue;
       const dirUri = uri.slice(0, slash);
       const name = decodeSegment(uri.slice(slash + 1));
-      const probe = probes.get(dirUri) ?? { dirUri, videoNames: new Set<string>() };
+      const probe = probes.get(dirUri) ?? {
+        dirUri,
+        videoNames: new Set<string>(),
+      };
       probe.videoNames.add(name);
       probes.set(dirUri, probe);
     }
@@ -213,13 +228,15 @@ async function planAlbumDeletion(albumId: string): Promise<AlbumPlan> {
         const entries = await readDirectoryAsync(dirUri);
         const extras = entries.filter((name) => !videoNames.has(name));
         if (extras.length === 0) {
-          console.log(`[deleteFolders] ${dirUri}: only videos → will remove folder`);
+          console.log(
+            `[deleteFolders] ${dirUri}: only videos → will remove folder`,
+          );
           emptyableDirs.push(dirUri);
         } else {
           console.log(
             `[deleteFolders] ${dirUri}: ${extras.length} extra entr${
-              extras.length === 1 ? 'y' : 'ies'
-            } (${extras.join(', ')}) → keeping folder`,
+              extras.length === 1 ? "y" : "ies"
+            } (${extras.join(", ")}) → keeping folder`,
           );
         }
       } catch (err) {
@@ -255,7 +272,7 @@ export async function deleteFolders(ids: string[]): Promise<void> {
 
   // Delete just the videos, leaving any other files in the folder in place.
   await deleteVideos(assetIds);
-  console.log('[deleteFolders] videos deleted');
+  console.log("[deleteFolders] videos deleted");
 
   // Now that the videos are gone, remove the directories that are left empty.
   for (const dirUri of toRemove) {
@@ -275,50 +292,80 @@ export async function deleteFolders(ids: string[]): Promise<void> {
 }
 
 /**
+ * Simple serial queue – ensures only one duration probe runs at a time so we
+ * never allocate more than one native video player/decoder simultaneously.
+ * This prevents OOM crashes on low-RAM devices when a playlist has many videos
+ * whose media-library metadata reports duration = 0.
+ */
+let _durationQueue: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const task = _durationQueue.then(fn, fn);
+  // Keep the chain going regardless of success/failure.
+  _durationQueue = task.then(
+    () => {},
+    () => {},
+  );
+  return task;
+}
+
+/**
  * Fallback duration probe for videos whose media-library metadata reports 0
  * (some files, especially recently copied or downloaded ones, aren't indexed
  * with a duration yet). Spins up a temporary player and reads the duration the
  * decoder reports once the source loads. Returns seconds, or null if it can't
  * resolve within the timeout. The player is always released.
+ *
+ * Calls are serialized: only one player is alive at any time, keeping memory
+ * usage constant regardless of how many videos need probing.
  */
-export async function getVideoDuration(uri: string, timeoutMs = 8000): Promise<number | null> {
-  const player = createVideoPlayer(uri);
-  try {
-    return await new Promise<number | null>((resolve) => {
-      let settled = false;
-      const finish = (value: number | null) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        sub.remove();
-        resolve(value);
-      };
+export function getVideoDuration(
+  uri: string,
+  timeoutMs = 5000,
+): Promise<number | null> {
+  return enqueue(async () => {
+    const player = createVideoPlayer(uri);
+    try {
+      return await new Promise<number | null>((resolve) => {
+        let settled = false;
+        const finish = (value: number | null) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          sub.remove();
+          resolve(value);
+        };
 
-      const timer = setTimeout(() => finish(null), timeoutMs);
+        const timer = setTimeout(() => finish(null), timeoutMs);
 
-      // expo-video reports duration in seconds, available once the source loads.
-      const sub = player.addListener('sourceLoad', ({ duration }) => {
-        finish(duration && duration > 0 ? duration : null);
+        // expo-video reports duration in seconds, available once the source loads.
+        const sub = player.addListener("sourceLoad", ({ duration }) => {
+          finish(duration && duration > 0 ? duration : null);
+        });
+
+        // It may already be loaded by the time we subscribe.
+        if (player.duration > 0) finish(player.duration);
       });
-
-      // It may already be loaded by the time we subscribe.
-      if (player.duration > 0) finish(player.duration);
-    });
-  } catch {
-    return null;
-  } finally {
-    player.release();
-  }
+    } catch {
+      return null;
+    } finally {
+      player.release();
+    }
+  });
 }
 
 /**
  * Generate a single still frame for a video. Returns a native image reference
  * that expo-image can render directly. The temporary player is released after.
  */
-export async function generateVideoThumbnail(uri: string): Promise<VideoThumbnail | null> {
+export async function generateVideoThumbnail(
+  uri: string,
+): Promise<VideoThumbnail | null> {
   const player = createVideoPlayer(uri);
   try {
-    const thumbnails = await player.generateThumbnailsAsync([0.1], { maxWidth: 640 });
+    const thumbnails = await player.generateThumbnailsAsync([0.1], {
+      maxWidth: 640,
+    });
     return thumbnails[0] ?? null;
   } catch {
     return null;
