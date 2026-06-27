@@ -38,6 +38,19 @@ module.exports = {
       package: IS_DEV
         ? "com.rahulghosh.vplayer"
         : "com.rahulghosh.mordernvideoplayer",
+      // Register the app as a handler for video files so it shows up under the
+      // file manager's "Open with" menu. File managers fire ACTION_VIEW with a
+      // content:// (or file://) URI and a video/* MIME type.
+      intentFilters: [
+        {
+          action: "VIEW",
+          category: ["DEFAULT", "BROWSABLE"],
+          data: [
+            { mimeType: "video/*", scheme: "content" },
+            { mimeType: "video/*", scheme: "file" },
+          ],
+        },
+      ],
     },
     web: {
       output: "static",

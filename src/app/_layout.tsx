@@ -1,8 +1,10 @@
 import '@/global.css';
 
+import * as Linking from 'expo-linking';
 import {
   DarkTheme,
   DefaultTheme,
+  router,
   Stack,
   ThemeProvider as NavigationThemeProvider,
 } from 'expo-router';
@@ -44,6 +46,11 @@ function RootNavigator() {
   );
 }
 
+/** A file URI handed to us by another app (file manager "Open with"). */
+function isExternalVideoUrl(url: string | null): url is string {
+  return !!url && (url.startsWith('content://') || url.startsWith('file://'));
+}
+
 export default function RootLayout() {
   // Load saved playback progress and lock the app to portrait on launch
   // (the player rotates to landscape on its own for wide videos).
@@ -51,6 +58,22 @@ export default function RootLayout() {
     void playbackStore.hydrate();
     void playerPrefs.hydrate();
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+  }, []);
+
+  // Open videos launched from another app's "Open with" menu. The intent's
+  // content://|file:// URI arrives as the launch URL (cold start) or via the
+  // 'url' event (already running, singleTask brings us forward); we route it
+  // straight to the player as a standalone clip.
+  useEffect(() => {
+    let lastHandled: string | null = null;
+    const open = (url: string | null) => {
+      if (!isExternalVideoUrl(url) || url === lastHandled) return;
+      lastHandled = url;
+      router.push({ pathname: '/player', params: { uri: url } });
+    };
+    void Linking.getInitialURL().then(open);
+    const sub = Linking.addEventListener('url', ({ url }) => open(url));
+    return () => sub.remove();
   }, []);
 
   return (

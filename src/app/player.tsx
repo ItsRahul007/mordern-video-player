@@ -5,7 +5,7 @@ import * as ScreenOrientation from "expo-screen-orientation";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, BackHandler, View } from "react-native";
 import Animated, {
   useAnimatedReaction,
   useAnimatedStyle,
@@ -21,7 +21,7 @@ import {
   pickPreferredAudioTrack,
 } from "@/lib/audio-track";
 import { useFolderVideos } from "@/hooks/use-video-folders";
-import { sortVideos } from "@/lib/media";
+import { sortVideos, type VideoAsset } from "@/lib/media";
 import { playbackStore, RESUME_THRESHOLD } from "@/lib/playback-store";
 import { playerPrefs } from "@/lib/player-prefs";
 import { useSort } from "@/providers/sort-provider";
@@ -30,21 +30,57 @@ type Orientation = "landscape" | "portrait";
 
 export default function PlayerScreen() {
   const router = useRouter();
-  const { albumId, id } = useLocalSearchParams<{
-    albumId: string;
-    id: string;
+  const { albumId, id, uri: externalUri } = useLocalSearchParams<{
+    albumId?: string;
+    id?: string;
+    uri?: string;
   }>();
-  const { data: videos, isLoading } = useFolderVideos(albumId);
+  // External mode: a single video handed in by another app ("Open with").
+  // There's no folder, so there's no playlist and no next/prev.
+  const isExternal = !!externalUri;
+  const { data: videos, isLoading } = useFolderVideos(
+    isExternal ? undefined : albumId,
+  );
   const { sort } = useSort();
 
-  // The playlist must match the order shown in the folder (the selected filter).
+  // Synthesize a one-off asset for the incoming URI. The display name is the
+  // best we can derive from the URI; content:// URIs rarely carry a real one.
+  const externalVideo = useMemo<VideoAsset | undefined>(() => {
+    if (!externalUri) return undefined;
+    let filename = "Video";
+    try {
+      filename = decodeURIComponent(externalUri.split("/").pop() ?? "") || "Video";
+    } catch {
+      filename = "Video";
+    }
+    return {
+      id: externalUri,
+      uri: externalUri,
+      filename,
+      duration: 0,
+      width: 0,
+      height: 0,
+      creationTime: 0,
+      size: null,
+    };
+  }, [externalUri]);
+
+  // The playlist must match the order shown in the folder (the selected filter);
+  // in external mode it's just the single incoming clip.
   const playlist = useMemo(
-    () => (videos ? sortVideos(videos, sort) : undefined),
-    [videos, sort],
+    () =>
+      isExternal
+        ? externalVideo
+          ? [externalVideo]
+          : undefined
+        : videos
+          ? sortVideos(videos, sort)
+          : undefined,
+    [isExternal, externalVideo, videos, sort],
   );
 
   // Track the currently playing video within the folder playlist.
-  const [currentId, setCurrentId] = useState(id);
+  const [currentId, setCurrentId] = useState(id ?? externalUri);
   const index = playlist?.findIndex((v) => v.id === currentId) ?? -1;
   const current = index >= 0 ? playlist?.[index] : undefined;
   const hasPrev = index > 0;
@@ -236,6 +272,26 @@ export default function PlayerScreen() {
     }
   });
 
+  // Leave the player. Normally we just pop back to the folder we came from, but
+  // when the app was launched straight into the player from another app's "Open
+  // with", there's nothing beneath us — fall back to the home screen so back
+  // never drops the user out of the app.
+  const handleClose = useCallback(() => {
+    if (router.canGoBack()) router.back();
+    else router.replace("/");
+  }, [router]);
+
+  // Intercept the Android hardware back button in external mode so it routes to
+  // home instead of exiting the app.
+  useEffect(() => {
+    if (!isExternal) return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      handleClose();
+      return true;
+    });
+    return () => sub.remove();
+  }, [isExternal, handleClose]);
+
   const goNext = () => {
     if (playlist && index >= 0 && index < playlist.length - 1)
       setCurrentId(playlist[index + 1].id);
@@ -308,7 +364,7 @@ export default function PlayerScreen() {
         <VideoControls
           player={player}
           title={current.filename}
-          onClose={() => router.back()}
+          onClose={handleClose}
           onNext={goNext}
           onPrev={goPrev}
           hasNext={hasNext}
