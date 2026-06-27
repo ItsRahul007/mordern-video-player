@@ -19,6 +19,8 @@ import { Directory, File, Paths } from "expo-file-system";
 import { Platform } from "react-native";
 import { subscribe, unzip } from "react-native-zip-archive";
 
+import { scanFolder } from "@modules/all-files-access";
+
 /**
  * Raw filesystem path of the folder we browse/extract in. Kept as a *decoded*
  * path (no `file://`, no percent-encoding) because react-native-zip-archive
@@ -112,7 +114,14 @@ export async function extractZip(
 
   const sub = subscribe(({ progress }) => onProgress?.(progress));
   try {
-    return await unzip(sourcePath, targetPath);
+    // `unzip` writes via raw java.io, leaving the extracted files absent from
+    // MediaStore — so the videos wouldn't appear in the library (or in a
+    // sibling dev/preview build, a separate package) until the OS happened to
+    // scan them. Index them explicitly so they're immediately visible to every
+    // app with media-read permission.
+    const dir = await unzip(sourcePath, targetPath);
+    await scanFolder(dir);
+    return dir;
   } finally {
     sub.remove();
   }

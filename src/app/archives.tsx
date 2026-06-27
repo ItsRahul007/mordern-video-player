@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useNavigation, useRouter } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -35,6 +35,7 @@ type Dialog =
 
 export default function ArchivesScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
   const queryClient = useQueryClient();
   const { colors } = useTheme();
   const { openSettings } = useAllFilesAccess();
@@ -54,11 +55,23 @@ export default function ArchivesScreen() {
   // just says "no zips".
   const [hasAccess, setHasAccess] = useState<boolean>(hasAllFilesAccess);
 
-  // Hardware back exits selection mode first (before leaving the screen).
+  // True while at least one archive is being extracted. We block all back
+  // navigation until it finishes — interrupting a raw-java.io unzip mid-write
+  // would leave a half-extracted folder behind.
+  const extracting = Object.keys(progress).length > 0;
+
+  // Block the swipe-back gesture (native stack) while extracting.
+  useEffect(() => {
+    navigation.setOptions({ gestureEnabled: !extracting });
+  }, [navigation, extracting]);
+
+  // Hardware back: blocked entirely while extracting, otherwise exits selection
+  // mode first (before leaving the screen).
   const { active: selectionActive, clear: clearSelection } = selection;
   useFocusEffect(
     useCallback(() => {
       const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+        if (extracting) return true;
         if (selectionActive) {
           clearSelection();
           return true;
@@ -66,7 +79,7 @@ export default function ArchivesScreen() {
         return false;
       });
       return () => sub.remove();
-    }, [selectionActive, clearSelection]),
+    }, [extracting, selectionActive, clearSelection]),
   );
 
   const refreshList = () =>
@@ -220,8 +233,10 @@ export default function ArchivesScreen() {
     <View className="flex-row items-center gap-2 px-2 py-1">
       <Pressable
         onPress={() => router.back()}
+        disabled={extracting}
         hitSlop={10}
         className="p-2 active:opacity-70"
+        style={{ opacity: extracting ? 0.3 : 1 }}
       >
         <Icon name="back" size={22} color={colors.text} />
       </Pressable>

@@ -59,5 +59,25 @@ class AllFilesAccessModule : Module() {
 
       dest.absolutePath
     }
+
+    // Recursively index every file under `path` into MediaStore. Needed after
+    // react-native-zip-archive's `unzip()`, which writes via raw java.io and so
+    // leaves the extracted videos absent from MediaStore — invisible to the
+    // media library until the OS happens to scan them, and invisible to OTHER
+    // apps/packages entirely (e.g. a sibling dev/preview build). A scan inserts
+    // them into the shared, world-readable media collections. `path` is a raw
+    // absolute path — NO `file://` scheme, already decoded. Returns the number
+    // of files submitted to the scanner. Async so the walk runs off the JS thread.
+    AsyncFunction("scanFolder") { path: String ->
+      val files = File(path).walkTopDown()
+        .filter { it.isFile }
+        .map { it.absolutePath }
+        .toList()
+      if (files.isNotEmpty()) {
+        val context = appContext.reactContext ?: throw Exceptions.ReactContextLost()
+        MediaScannerConnection.scanFile(context, files.toTypedArray(), null, null)
+      }
+      files.size
+    }
   }
 }
