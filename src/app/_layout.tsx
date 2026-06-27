@@ -12,6 +12,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useShareIntent } from 'expo-share-intent';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { useTheme } from '@/hooks/use-theme';
@@ -52,6 +53,25 @@ function isExternalVideoUrl(url: string | null): url is string {
   return !!url && (url.startsWith('content://') || url.startsWith('file://'));
 }
 
+/**
+ * Routes a link shared into the app (e.g. Instagram → Share → Video Player) to
+ * the Instagram downloader with the URL prefilled. Renders nothing.
+ */
+function ShareIntentHandler() {
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent();
+
+  useEffect(() => {
+    if (!hasShareIntent) return;
+    const link = shareIntent.webUrl ?? shareIntent.text ?? null;
+    if (link) {
+      router.push({ pathname: '/instagram', params: { sharedUrl: link } });
+    }
+    resetShareIntent();
+  }, [hasShareIntent, shareIntent, resetShareIntent]);
+
+  return null;
+}
+
 export default function RootLayout() {
   // Load saved playback progress and lock the app to portrait on launch
   // (the player rotates to landscape on its own for wide videos).
@@ -83,6 +103,7 @@ export default function RootLayout() {
         <ThemeProvider>
           <SortProvider>
             <AnimatedSplashOverlay />
+            <ShareIntentHandler />
             <RootNavigator />
           </SortProvider>
         </ThemeProvider>

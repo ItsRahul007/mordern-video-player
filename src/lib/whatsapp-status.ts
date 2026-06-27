@@ -36,7 +36,7 @@ import { copyToPublicDir } from "@modules/all-files-access";
 const BASE = "/storage/emulated/0";
 
 /** Public folder saved statuses are copied into (raw, decoded path). */
-export const SAVE_DIR = `${BASE}/WhatsApp Status Saver`;
+export const SAVE_DIR = `${BASE}/Mordern Video Player/Whatsapp Status`;
 
 /**
  * Candidate `.Statuses` directories, as *raw* decoded paths. We scan all that

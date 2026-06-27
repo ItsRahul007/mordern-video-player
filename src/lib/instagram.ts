@@ -1,23 +1,30 @@
 /**
- * Download videos from Instagram reels/posts and save them to the gallery.
+ * Download videos and images from Instagram reels/posts to a public folder.
  *
  * For personal/offline use. As of 2026 Instagram serves a login wall to every
- * anonymous request (GraphQL, post page, and embed alike), so extraction now
- * requires a logged-in session. We get one by running the GraphQL query *inside*
- * a WebView the user has logged into (see components/instagram-webview.tsx): the
- * page-context fetch automatically carries the session cookies, including the
- * httpOnly `sessionid`. This module holds the shared constants, the response
- * parser, and the download/save step (the CDN video URL itself is signed and
- * downloads fine without cookies).
+ * anonymous request, so extraction now requires a logged-in session. We get one
+ * by running the request *inside* a WebView the user has logged into (see
+ * components/instagram-webview.tsx): the page-context fetch automatically carries
+ * the session cookies, including the httpOnly `sessionid`. This module holds the
+ * shared constants, the response parser, and the download/save step (the signed
+ * CDN media URL itself downloads fine without cookies).
  *
- * The {@link GRAPHQL_DOC_ID} is undocumented and rotated by Instagram every few
- * weeks — if fetching suddenly fails for posts that are definitely public, that's
- * the first thing to refresh.
+ * Saves land in a "Mordern Video Player" folder at the storage root via the
+ * native raw-Java copy (expo-file-system refuses to write to shared storage even
+ * with the all-files grant — same constraint the WhatsApp status saver hits, see
+ * lib/whatsapp-status.ts). On iOS, where that folder concept doesn't apply, the
+ * media goes to the gallery via expo-media-library instead.
  * https://docs.expo.dev/versions/v56.0.0/sdk/filesystem/
  * https://docs.expo.dev/versions/v56.0.0/sdk/media-library/
  */
 import { Directory, File, Paths } from "expo-file-system";
 import { Asset } from "expo-media-library";
+import { Platform } from "react-native";
+
+import { copyToPublicDir } from "@modules/all-files-access";
+
+/** Public folder, at the storage root, that downloads are saved into (Android). */
+export const SAVE_DIR = "/storage/emulated/0/Mordern Video Player/Instagram";
 
 /** Instagram's public web App ID (stable; sent by the official web client). */
 export const IG_APP_ID = "936619743392459";
@@ -46,11 +53,12 @@ const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-/** A single downloadable video extracted from a post (a post may be a carousel). */
-export type InstagramVideo = {
-  /** Direct CDN URL of the .mp4. */
+/** A single downloadable item from a post (a post may be a carousel of several). */
+export type InstagramItem = {
+  type: "video" | "image";
+  /** Direct CDN URL of the .mp4 (video) or .jpg (image). */
   url: string;
-  /** Poster image URL, or null. */
+  /** Preview image URL (a video's poster, or the image itself). */
   thumbnail: string | null;
   width: number;
   height: number;
@@ -60,7 +68,7 @@ export type InstagramMedia = {
   shortcode: string;
   /** Post owner's username, used to name saved files. */
   username: string | null;
-  videos: InstagramVideo[];
+  items: InstagramItem[];
 };
 
 /** Raised for any expected failure so the UI can show a friendly message. */
@@ -109,22 +117,42 @@ export async function resolveShortcode(rawUrl: string): Promise<string> {
 type MediaInfoItem = {
   /** Highest-quality first; the entry's `url` is the playable mp4. */
   video_versions?: { url?: string; width?: number; height?: number }[];
-  image_versions2?: { candidates?: { url?: string }[] };
+  /** Highest-quality first; used as the poster for videos and the file for images. */
+  image_versions2?: {
+    candidates?: { url?: string; width?: number; height?: number }[];
+  };
   /** Present on carousel posts; each child is itself a media item. */
   carousel_media?: MediaInfoItem[];
   user?: { username?: string };
 };
 
-/** Turn a media-info item into an InstagramVideo if it carries a video. */
-function toVideo(item: MediaInfoItem): InstagramVideo | null {
-  const version = item.video_versions?.[0];
-  if (!version?.url) return null;
-  return {
-    url: version.url,
-    thumbnail: item.image_versions2?.candidates?.[0]?.url ?? null,
-    width: version.width ?? 0,
-    height: version.height ?? 0,
-  };
+/**
+ * Turn a media-info item into an InstagramItem. Prefers the video stream; falls
+ * back to the still image so photo posts (and image slides in a carousel) are
+ * downloadable too. Returns null only if neither is present.
+ */
+function toItem(item: MediaInfoItem): InstagramItem | null {
+  const video = item.video_versions?.[0];
+  const image = item.image_versions2?.candidates?.[0];
+  if (video?.url) {
+    return {
+      type: "video",
+      url: video.url,
+      thumbnail: image?.url ?? null,
+      width: video.width ?? 0,
+      height: video.height ?? 0,
+    };
+  }
+  if (image?.url) {
+    return {
+      type: "image",
+      url: image.url,
+      thumbnail: image.url,
+      width: image.width ?? 0,
+      height: image.height ?? 0,
+    };
+  }
+  return null;
 }
 
 /** Compact preview of a long string for logs. */
@@ -137,9 +165,9 @@ function snippet(text: string, max = 600): string {
 
 /**
  * Parse the raw body of an `/api/v1/media/{id}/info/` response (fetched inside
- * the logged-in WebView) into the post's downloadable videos. Throws
- * {@link InstagramError} with a user-facing message if the body isn't usable
- * JSON, has no media (private/invalid/login wall), or contains no video.
+ * the logged-in WebView) into the post's downloadable items (videos and images).
+ * Throws {@link InstagramError} with a user-facing message if the body isn't
+ * usable JSON, has no media (private/invalid/login wall), or has nothing to save.
  */
 export function parseMediaInfoResponse(
   text: string,
@@ -164,21 +192,19 @@ export function parseMediaInfoResponse(
   }
 
   const nodes = item.carousel_media?.length ? item.carousel_media : [item];
-  const videos = nodes
-    .map(toVideo)
-    .filter((v): v is InstagramVideo => v !== null);
+  const items = nodes.map(toItem).filter((i): i is InstagramItem => i !== null);
 
   console.log(
-    `[instagram] parsed ${nodes.length} node(s), ${videos.length} video(s), owner=${item.user?.username}`,
+    `[instagram] parsed ${nodes.length} node(s), ${items.length} item(s), owner=${item.user?.username}`,
   );
-  if (videos.length === 0) {
-    throw new InstagramError("This post doesn't contain a video to download.");
+  if (items.length === 0) {
+    throw new InstagramError("This post has no media to download.");
   }
 
-  return { shortcode, username: item.user?.username ?? null, videos };
+  return { shortcode, username: item.user?.username ?? null, items };
 }
 
-/** Cache dir downloads land in before being copied into the gallery. */
+/** Cache dir downloads land in before being moved to their final location. */
 function cacheDir(): Directory {
   const dir = new Directory(Paths.cache, "instagram");
   if (!dir.exists) dir.create();
@@ -186,17 +212,51 @@ function cacheDir(): Directory {
 }
 
 /**
- * Download one video and save it to the device gallery via expo-media-library
- * (`Asset.create`), which needs only the standard media permission and works on
- * both iOS and Android. The temporary cache file is removed afterwards. Returns
- * the created asset's id. Throws {@link InstagramError} on failure.
+ * Build a `file://` URI from a raw path by percent-encoding each segment. The
+ * new File/Directory API parses its argument as a `java.net.URI`, which throws on
+ * raw spaces (and "Mordern Video Player" has them), so the path must be encoded.
  */
-export async function saveInstagramVideo(
-  video: InstagramVideo,
+function pathToUri(path: string): string {
+  return `file://${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/** Strip `file://` and percent-decode a URI to a raw path for the native copy. */
+function uriToPath(uri: string): string {
+  return decodeURIComponent(uri.replace(/^file:\/\//, ""));
+}
+
+/**
+ * A destination under {@link SAVE_DIR} for `name` that doesn't exist yet,
+ * inserting ` (1)`, ` (2)`, … before the extension so re-saving never overwrites
+ * a previous download. Mirrors the WhatsApp status saver's behaviour.
+ */
+function uniqueDestPath(name: string): string {
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+
+  let candidate = `${SAVE_DIR}/${name}`;
+  let suffix = 1;
+  while (new File(pathToUri(candidate)).exists) {
+    candidate = `${SAVE_DIR}/${base} (${suffix})${ext}`;
+    suffix++;
+  }
+  return candidate;
+}
+
+/**
+ * Download one item and save it. On Android it's copied into the public
+ * {@link SAVE_DIR} folder via the native raw-Java copy (which also media-scans
+ * it so it shows in the gallery) — this needs the all-files grant. On iOS it goes
+ * to the photo library via expo-media-library. The temporary cache file is always
+ * removed. Returns the saved path/asset id. Throws {@link InstagramError}.
+ */
+export async function saveInstagramItem(
+  item: InstagramItem,
   baseName: string,
 ): Promise<string> {
-  const filename = `${baseName}.mp4`;
-  console.log(`[instagram] downloading ${filename}`);
+  const filename = `${baseName}.${item.type === "video" ? "mp4" : "jpg"}`;
+  console.log(`[instagram] downloading ${filename} (${item.type})`);
 
   let downloaded: File | null = null;
   try {
@@ -204,21 +264,27 @@ export async function saveInstagramVideo(
     // on an already-existing destination.
     const dest = new File(cacheDir(), filename);
     if (dest.exists) dest.delete();
-    downloaded = await File.downloadFileAsync(video.url, dest);
+    downloaded = await File.downloadFileAsync(item.url, dest);
   } catch (err) {
     console.warn("[instagram] download failed:", err);
     throw new InstagramError(
-      "Download failed. The video link may have expired.",
+      "Download failed. The media link may have expired.",
     );
   }
 
   try {
+    if (Platform.OS === "android") {
+      const destPath = uniqueDestPath(filename);
+      const saved = await copyToPublicDir(uriToPath(downloaded.uri), destPath);
+      console.log(`[instagram] saved to folder: ${saved}`);
+      return saved;
+    }
     const asset = await Asset.create(downloaded.uri);
     console.log(`[instagram] saved to gallery: ${asset.id}`);
     return asset.id;
   } catch (err) {
-    console.warn("[instagram] save-to-gallery failed:", err);
-    throw new InstagramError("Couldn't save the video to your gallery.");
+    console.warn("[instagram] save failed:", err);
+    throw new InstagramError("Couldn't save the media to your device.");
   } finally {
     try {
       downloaded.delete();

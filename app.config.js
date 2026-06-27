@@ -91,6 +91,9 @@ module.exports = {
           isAccessMediaLocationEnabled: false,
         },
       ],
+      // Receive shared links (e.g. "Share → Video Player" from Instagram).
+      // Defaults to text + URL sharing, which is what social links arrive as.
+      "expo-share-intent",
       "./plugins/with-single-abi.js",
       "./plugins/with-gradle-memory.js",
     ],
