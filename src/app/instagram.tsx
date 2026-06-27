@@ -4,7 +4,6 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Keyboard,
   Platform,
   Pressable,
@@ -14,11 +13,13 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { ConfirmSheet } from "@/components/confirm-sheet";
 import { Icon } from "@/components/icon";
 import {
   InstagramWebView,
   type InstagramWebViewHandle,
 } from "@/components/instagram-webview";
+import { MessageSheet } from "@/components/message-sheet";
 import { ThemedText } from "@/components/themed-text";
 import { useMediaPermissions } from "@/hooks/use-permissions";
 import {
@@ -56,6 +57,15 @@ export default function InstagramScreen() {
   const [savedIndices, setSavedIndices] = useState<ReadonlySet<number>>(
     new Set(),
   );
+  // Whether every item has been saved (drives the "✅ Saved" button state).
+  const [savedAll, setSavedAll] = useState(false);
+  // Error shown in a bottom sheet (replaces system alerts).
+  const [errorSheet, setErrorSheet] = useState<{
+    title: string;
+    message: string;
+  } | null>(null);
+  // The Android all-files permission prompt (shown as a bottom sheet).
+  const [permissionSheet, setPermissionSheet] = useState(false);
 
   const fetchingRef = useRef(false);
   const autoRan = useRef(false);
@@ -79,18 +89,20 @@ export default function InstagramScreen() {
       }
       const body = await webRef.current.fetchMedia(mediaId);
       setSavedIndices(new Set());
+      setSavedAll(false);
       setMedia(parseMediaInfoResponse(body, shortcode));
     } catch (err) {
       console.warn(
         "[instagram] fetch failed:",
         err instanceof Error ? `${err.name}: ${err.message}` : String(err),
       );
-      Alert.alert(
-        "Couldn't fetch media",
-        err instanceof InstagramError
-          ? err.message
-          : "Something went wrong. Please try again.",
-      );
+      setErrorSheet({
+        title: "Couldn't fetch media",
+        message:
+          err instanceof InstagramError
+            ? err.message
+            : "Something went wrong. Please try again.",
+      });
     } finally {
       fetchingRef.current = false;
       setFetching(false);
@@ -116,14 +128,7 @@ export default function InstagramScreen() {
   const ensurePermission = useCallback(async (): Promise<boolean> => {
     if (Platform.OS === "android") {
       if (!hasAllFilesAccess()) {
-        Alert.alert(
-          "Allow file access",
-          'To save into the "Mordern Video Player" folder, allow access to all files.',
-          [
-            { text: "Cancel", style: "cancel" },
-            { text: "Open settings", onPress: openSettings },
-          ],
-        );
+        setPermissionSheet(true);
         return false;
       }
       return true;
@@ -131,15 +136,15 @@ export default function InstagramScreen() {
     if (!granted) {
       const res = await requestPermission();
       if (!res.granted) {
-        Alert.alert(
-          "Permission needed",
-          "Allow access to your media library to save videos.",
-        );
+        setErrorSheet({
+          title: "Permission needed",
+          message: "Allow access to your media library to save videos.",
+        });
         return false;
       }
     }
     return true;
-  }, [granted, requestPermission, openSettings]);
+  }, [granted, requestPermission]);
 
   const baseName = (m: InstagramMedia) =>
     m.username ? `${m.username}_${m.shortcode}` : `instagram_${m.shortcode}`;
@@ -147,38 +152,39 @@ export default function InstagramScreen() {
   const itemFileName = (m: InstagramMedia, index: number) =>
     m.items.length > 1 ? `${baseName(m)}_${index + 1}` : baseName(m);
 
-  const savedLocation =
-    Platform.OS === "android"
-      ? 'the "Mordern Video Player" folder'
-      : "your gallery";
-
-  // Download every item, then reset the screen for the next link.
+  // Download every item; the button then reflects "✅ Saved".
   const onSaveAll = async () => {
     if (!media || saving || savingIndex !== null) return;
     if (!(await ensurePermission())) return;
 
     setSaving(true);
     let saved = 0;
+    const next = new Set(savedIndices);
     for (const [index, item] of media.items.entries()) {
       try {
         await saveInstagramItem(item, itemFileName(media, index));
         saved++;
+        next.add(index);
       } catch (err) {
         console.warn("[instagram] save failed:", err);
       }
     }
+    setSavedIndices(next);
     setSaving(false);
 
-    if (saved === 0) {
-      Alert.alert("Save failed", "Couldn't save to your device.");
-      return;
+    if (saved === media.items.length) {
+      setSavedAll(true);
+    } else if (saved === 0) {
+      setErrorSheet({
+        title: "Save failed",
+        message: "Couldn't save to your device. Please try again.",
+      });
+    } else {
+      setErrorSheet({
+        title: "Partially saved",
+        message: `Saved ${saved} of ${media.items.length} items. Tap the others to retry.`,
+      });
     }
-    setMedia(null);
-    setUrl("");
-    Alert.alert(
-      saved === media.items.length ? "Saved" : "Partially saved",
-      `Saved ${saved} item${saved === 1 ? "" : "s"} to ${savedLocation}.`,
-    );
   };
 
   // Download a single item from a multi-item post; marks it with a checkmark.
@@ -192,7 +198,10 @@ export default function InstagramScreen() {
       setSavedIndices((prev) => new Set(prev).add(index));
     } catch (err) {
       console.warn("[instagram] save failed:", err);
-      Alert.alert("Save failed", "Couldn't save this item.");
+      setErrorSheet({
+        title: "Save failed",
+        message: "Couldn't save this item. Please try again.",
+      });
     } finally {
       setSavingIndex(null);
     }
@@ -335,7 +344,7 @@ export default function InstagramScreen() {
               </View>
               <Pressable
                 onPress={onSaveAll}
-                disabled={saving || savingIndex !== null}
+                disabled={saving || savingIndex !== null || savedAll}
                 style={{ backgroundColor: colors.accent }}
                 className={`flex-row items-center justify-center gap-2 rounded-full py-3.5 active:opacity-80 ${
                   saving || savingIndex !== null ? "opacity-50" : ""
@@ -343,6 +352,10 @@ export default function InstagramScreen() {
               >
                 {saving ? (
                   <ActivityIndicator color="#ffffff" />
+                ) : savedAll ? (
+                  <ThemedText className="font-semibold text-white">
+                    ✅ Saved
+                  </ThemedText>
                 ) : (
                   <>
                     <Icon name="save" size={20} color="#ffffff" />
@@ -386,6 +399,25 @@ export default function InstagramScreen() {
           <ThemedText type="muted">Connecting…</ThemedText>
         </View>
       )}
+
+      <MessageSheet
+        visible={errorSheet !== null}
+        title={errorSheet?.title ?? ""}
+        message={errorSheet?.message}
+        onClose={() => setErrorSheet(null)}
+      />
+
+      <ConfirmSheet
+        visible={permissionSheet}
+        title="Allow file access"
+        message={'To save into the "Mordern Video Player" folder, allow access to all files.'}
+        confirmLabel="Open settings"
+        onConfirm={() => {
+          setPermissionSheet(false);
+          void openSettings();
+        }}
+        onCancel={() => setPermissionSheet(false)}
+      />
     </SafeAreaView>
   );
 }
