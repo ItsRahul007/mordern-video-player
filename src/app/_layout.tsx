@@ -29,6 +29,7 @@ function RootNavigator() {
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="index" />
         <Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="instagram" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="archives" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="status-saver" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen

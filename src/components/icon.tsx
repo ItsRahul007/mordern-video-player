@@ -8,6 +8,7 @@ import type { ColorValue } from 'react-native';
  */
 const BRAND_ICONS = {
   whatsapp: 'whatsapp',
+  instagram: 'instagram',
 } as const;
 
 /**
