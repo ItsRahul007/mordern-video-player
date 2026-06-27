@@ -1,0 +1,19 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <!--
+      A dedicated FileProvider so we can hand out content:// URIs for arbitrary
+      files on shared storage when building the share intent. The authority is
+      keyed off ${applicationId} so the dev and production package names don't
+      collide, and stays distinct from expo-file-system's own provider.
+    -->
+    <provider
+      android:name="androidx.core.content.FileProvider"
+      android:authorities="${applicationId}.sharefilesprovider"
+      android:exported="false"
+      android:grantUriPermissions="true">
+      <meta-data
+        android:name="android.support.FILE_PROVIDER_PATHS"
+        android:resource="@xml/share_files_paths" />
+    </provider>
+  </application>
+</manifest>

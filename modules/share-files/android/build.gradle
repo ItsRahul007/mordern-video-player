@@ -1,0 +1,22 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.sharefiles'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.sharefiles"
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+dependencies {
+  // FileProvider lives in androidx.core. It's on the classpath transitively via
+  // expo-modules-core, but depend on it explicitly so the compile never breaks
+  // if that transitive edge changes.
+  implementation "androidx.core:core-ktx:1.13.1"
+}
