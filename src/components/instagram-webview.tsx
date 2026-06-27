@@ -20,11 +20,11 @@ import {
 import type { StyleProp, ViewStyle } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
-import { GRAPHQL_DOC_ID, IG_APP_ID, InstagramError } from "@/lib/instagram";
+import { IG_APP_ID, InstagramError } from "@/lib/instagram";
 
 export type InstagramWebViewHandle = {
-  /** Run the shortcode→media GraphQL query in the page context; resolves the raw response body. */
-  fetchMedia: (shortcode: string) => Promise<string>;
+  /** Fetch a media item's info in the page context; resolves the raw response body. */
+  fetchMedia: (mediaId: string) => Promise<string>;
 };
 
 type Props = {
@@ -48,25 +48,28 @@ const AUTH_CHECK = `
 })();
 `;
 
-/** Build the page-context fetch for one shortcode. Cookies ride along automatically. */
-function fetchScript(id: string, shortcode: string): string {
-  const body = `variables=${encodeURIComponent(
-    JSON.stringify({ shortcode }),
-  )}&doc_id=${GRAPHQL_DOC_ID}`;
+/**
+ * Build the page-context fetch for one media id. Hits Instagram's private mobile
+ * API (`/api/v1/media/{id}/info/`), which returns clean JSON for a logged-in
+ * session — unlike `/api/graphql`, which needs `fb_dtsg`/`lsd` tokens we don't
+ * have and otherwise just serves the app shell. Cookies ride along automatically
+ * because the fetch runs in instagram.com's own context.
+ */
+function fetchScript(id: string, mediaId: string): string {
+  const url = `https://www.instagram.com/api/v1/media/${mediaId}/info/`;
   return `
 (function(){
   try {
     var csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || "";
-    fetch("https://www.instagram.com/api/graphql", {
-      method: "POST",
+    fetch(${JSON.stringify(url)}, {
+      method: "GET",
       credentials: "include",
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
         "X-IG-App-ID": "${IG_APP_ID}",
+        "X-ASBD-ID": "129477",
         "X-CSRFToken": csrf,
         "X-Requested-With": "XMLHttpRequest"
-      },
-      body: ${JSON.stringify(body)}
+      }
     })
       .then(function(r){ return r.text(); })
       .then(function(t){ window.ReactNativeWebView.postMessage(JSON.stringify({ type: "fetch", id: "${id}", ok: true, body: t })); })
@@ -91,7 +94,7 @@ export const InstagramWebView = forwardRef<InstagramWebViewHandle, Props>(
     const pending = useRef(new Map<string, Pending>());
     const counter = useRef(0);
 
-    const fetchMedia = useCallback((shortcode: string) => {
+    const fetchMedia = useCallback((mediaId: string) => {
       return new Promise<string>((resolve, reject) => {
         const view = webRef.current;
         if (!view) {
@@ -104,8 +107,8 @@ export const InstagramWebView = forwardRef<InstagramWebViewHandle, Props>(
           reject(new InstagramError("Instagram took too long to respond."));
         }, FETCH_TIMEOUT_MS);
         pending.current.set(id, { resolve, reject, timer });
-        console.log(`[instagram] inject fetch id=${id} shortcode=${shortcode}`);
-        view.injectJavaScript(fetchScript(id, shortcode));
+        console.log(`[instagram] inject fetch id=${id} mediaId=${mediaId}`);
+        view.injectJavaScript(fetchScript(id, mediaId));
       });
     }, []);
 

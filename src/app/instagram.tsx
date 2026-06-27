@@ -23,9 +23,10 @@ import { useTheme } from "@/hooks/use-theme";
 import {
   InstagramError,
   type InstagramMedia,
-  parseMediaResponse,
+  parseMediaInfoResponse,
   resolveShortcode,
   saveInstagramVideo,
+  shortcodeToMediaId,
 } from "@/lib/instagram";
 
 export default function InstagramScreen() {
@@ -53,8 +54,12 @@ export default function InstagramScreen() {
     setMedia(null);
     try {
       const shortcode = await resolveShortcode(url);
-      const body = await webRef.current.fetchMedia(shortcode);
-      setMedia(parseMediaResponse(body, shortcode));
+      const mediaId = shortcodeToMediaId(shortcode);
+      if (!mediaId) {
+        throw new InstagramError("That link doesn't look like a valid post.");
+      }
+      const body = await webRef.current.fetchMedia(mediaId);
+      setMedia(parseMediaInfoResponse(body, shortcode));
     } catch (err) {
       console.warn(
         "[instagram] fetch failed:",

@@ -23,11 +23,24 @@ import { Asset } from "expo-media-library";
 export const IG_APP_ID = "936619743392459";
 
 /**
- * GraphQL `doc_id` for the `PolarisPostActionLoadPostQueryQuery` (shortcode →
- * media). Undocumented and rotated by Instagram periodically — if downloads start
- * failing with "couldn't read this post", this is the first thing to refresh.
+ * Decode a shortcode to its numeric media id. Instagram shortcodes are the post's
+ * media id encoded in url-safe base64, so the media id (needed for the private
+ * `/api/v1/media/{id}/info/` endpoint) is a plain base64 decode back to an
+ * integer. Uses BigInt because media ids exceed Number.MAX_SAFE_INTEGER. Returns
+ * null if the shortcode contains a character outside the alphabet.
  */
-export const GRAPHQL_DOC_ID = "10015901848480474";
+const SHORTCODE_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+export function shortcodeToMediaId(shortcode: string): string | null {
+  let id = 0n;
+  for (const ch of shortcode) {
+    const value = SHORTCODE_ALPHABET.indexOf(ch);
+    if (value < 0) return null;
+    id = id * 64n + BigInt(value);
+  }
+  return id.toString();
+}
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -92,26 +105,25 @@ export async function resolveShortcode(rawUrl: string): Promise<string> {
   );
 }
 
-type ShortcodeMediaNode = {
-  is_video?: boolean;
-  video_url?: string;
-  display_url?: string;
-  dimensions?: { width?: number; height?: number };
+/** One media item from the `/api/v1/media/{id}/info/` response. */
+type MediaInfoItem = {
+  /** Highest-quality first; the entry's `url` is the playable mp4. */
+  video_versions?: { url?: string; width?: number; height?: number }[];
+  image_versions2?: { candidates?: { url?: string }[] };
+  /** Present on carousel posts; each child is itself a media item. */
+  carousel_media?: MediaInfoItem[];
+  user?: { username?: string };
 };
 
-type ShortcodeMedia = ShortcodeMediaNode & {
-  owner?: { username?: string };
-  edge_sidecar_to_children?: { edges?: { node: ShortcodeMediaNode }[] };
-};
-
-/** Turn a raw media node into an InstagramVideo if it actually is a video. */
-function toVideo(node: ShortcodeMediaNode): InstagramVideo | null {
-  if (!node.is_video || !node.video_url) return null;
+/** Turn a media-info item into an InstagramVideo if it carries a video. */
+function toVideo(item: MediaInfoItem): InstagramVideo | null {
+  const version = item.video_versions?.[0];
+  if (!version?.url) return null;
   return {
-    url: node.video_url,
-    thumbnail: node.display_url ?? null,
-    width: node.dimensions?.width ?? 0,
-    height: node.dimensions?.height ?? 0,
+    url: version.url,
+    thumbnail: item.image_versions2?.candidates?.[0]?.url ?? null,
+    width: version.width ?? 0,
+    height: version.height ?? 0,
   };
 }
 
@@ -124,16 +136,16 @@ function snippet(text: string, max = 600): string {
 }
 
 /**
- * Parse the raw body of a `xdt_shortcode_media` GraphQL response (fetched inside
+ * Parse the raw body of an `/api/v1/media/{id}/info/` response (fetched inside
  * the logged-in WebView) into the post's downloadable videos. Throws
  * {@link InstagramError} with a user-facing message if the body isn't usable
  * JSON, has no media (private/invalid/login wall), or contains no video.
  */
-export function parseMediaResponse(
+export function parseMediaInfoResponse(
   text: string,
   shortcode: string,
 ): InstagramMedia {
-  let json: { data?: { xdt_shortcode_media?: ShortcodeMedia } };
+  let json: { items?: MediaInfoItem[] };
   try {
     json = JSON.parse(text);
   } catch {
@@ -143,33 +155,27 @@ export function parseMediaResponse(
     );
   }
 
-  const media = json?.data?.xdt_shortcode_media ?? null;
-  if (!media) {
-    console.warn(
-      "[instagram] no xdt_shortcode_media; data keys:",
-      JSON.stringify(Object.keys(json?.data ?? {})),
-      "| body:",
-      snippet(text),
-    );
+  const item = json?.items?.[0];
+  if (!item) {
+    console.warn("[instagram] no media item; body:", snippet(text));
     throw new InstagramError(
       "Couldn't read this post. It may be private, age-restricted, or the link is invalid.",
     );
   }
 
-  const children = media.edge_sidecar_to_children?.edges?.map((e) => e.node);
-  const nodes = children?.length ? children : [media];
+  const nodes = item.carousel_media?.length ? item.carousel_media : [item];
   const videos = nodes
     .map(toVideo)
     .filter((v): v is InstagramVideo => v !== null);
 
   console.log(
-    `[instagram] parsed ${nodes.length} node(s), ${videos.length} video(s), owner=${media.owner?.username}`,
+    `[instagram] parsed ${nodes.length} node(s), ${videos.length} video(s), owner=${item.user?.username}`,
   );
   if (videos.length === 0) {
     throw new InstagramError("This post doesn't contain a video to download.");
   }
 
-  return { shortcode, username: media.owner?.username ?? null, videos };
+  return { shortcode, username: item.user?.username ?? null, videos };
 }
 
 /** Cache dir downloads land in before being copied into the gallery. */
