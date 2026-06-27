@@ -6,6 +6,7 @@ import {
   BackHandler,
   FlatList,
   Modal,
+  Platform,
   Pressable,
   View,
 } from "react-native";
@@ -20,7 +21,12 @@ import { usePlaybackEntries } from "@/hooks/use-playback";
 import { useSelection } from "@/hooks/use-selection";
 import { useTheme } from "@/hooks/use-theme";
 import { useFolderVideos, videoKeys } from "@/hooks/use-video-folders";
-import { deleteVideos, sortVideos, type VideoAsset } from "@/lib/media";
+import {
+  deleteVideos,
+  shareVideos,
+  sortVideos,
+  type VideoAsset,
+} from "@/lib/media";
 import { useSort } from "@/providers/sort-provider";
 
 export default function FolderScreen() {
@@ -78,6 +84,20 @@ export default function FolderScreen() {
     else openPlayer(videoId);
   };
 
+  // Share the selected videos through the system share sheet.
+  const onShare = async () => {
+    const uris = (sortedVideos ?? [])
+      .filter((video) => selection.isSelected(video.id))
+      .map((video) => video.uri);
+    try {
+      await shareVideos(uris);
+      selection.clear();
+    } catch (err) {
+      // User dismissed the sheet, or none of the videos were shareable.
+      console.warn("[share] failed:", err);
+    }
+  };
+
   const confirmDelete = async () => {
     setConfirmOpen(false);
     try {
@@ -115,6 +135,15 @@ export default function FolderScreen() {
           <ThemedText type="subtitle" className="flex-1">
             {selection.count} selected
           </ThemedText>
+          {Platform.OS === "android" && (
+            <Pressable
+              onPress={onShare}
+              hitSlop={10}
+              className="p-2 active:opacity-70"
+            >
+              <Icon name="share" size={22} color={colors.text} />
+            </Pressable>
+          )}
           <Pressable
             onPress={() => setConfirmOpen(true)}
             hitSlop={10}

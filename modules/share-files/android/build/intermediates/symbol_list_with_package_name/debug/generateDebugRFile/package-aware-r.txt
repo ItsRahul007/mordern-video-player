@@ -1,0 +1,2 @@
+expo.modules.sharefiles
+xml share_files_paths

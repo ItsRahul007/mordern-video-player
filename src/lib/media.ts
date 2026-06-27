@@ -14,6 +14,8 @@ import {
 import { Album, Asset, AssetField, MediaType, Query } from "expo-media-library";
 import { createVideoPlayer, type VideoThumbnail } from "expo-video";
 
+import { fileUriToPath, shareFiles } from "@modules/share-files";
+
 export type VideoAsset = {
   id: string;
   /** Playable URI for the asset (file:// on Android, ph:// on iOS). */
@@ -163,6 +165,26 @@ export async function getFolderVideos(albumId: string): Promise<VideoAsset[]> {
 export async function deleteVideos(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   await Asset.delete(ids.map((id) => new Asset(id)));
+}
+
+/**
+ * Open the system share sheet for the given videos. Only `file://` assets can be
+ * shared this way (iOS `ph://` URIs have no on-disk path), so they're filtered
+ * out. Returns the number of videos offered to the sheet; throws if none are
+ * shareable. Android-only — backed by the native `share-files` module.
+ */
+export async function shareVideos(uris: string[]): Promise<number> {
+  const paths = uris.filter((u) => u.startsWith("file://")).map(fileUriToPath);
+  if (paths.length === 0) {
+    throw new Error("These videos can't be shared.");
+  }
+  return shareFiles(paths, "video/*");
+}
+
+/** Share every video inside the given folders through the system share sheet. */
+export async function shareFolders(albumIds: string[]): Promise<number> {
+  const lists = await Promise.all(albumIds.map(getFolderVideos));
+  return shareVideos(lists.flat().map((video) => video.uri));
 }
 
 /** The directory URI and the filenames of the album's videos inside it. */

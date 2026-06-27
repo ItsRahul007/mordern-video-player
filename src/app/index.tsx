@@ -20,7 +20,7 @@ import { useMediaPermissions } from "@/hooks/use-permissions";
 import { useSelection } from "@/hooks/use-selection";
 import { useTheme } from "@/hooks/use-theme";
 import { useVideoFolders, videoKeys } from "@/hooks/use-video-folders";
-import { deleteFolders } from "@/lib/media";
+import { deleteFolders, shareFolders } from "@/lib/media";
 
 export default function FoldersScreen() {
   const router = useRouter();
@@ -51,6 +51,17 @@ export default function FoldersScreen() {
     }, [selectionActive, clearSelection]),
   );
 
+  // Share every video inside the selected folders through the share sheet.
+  const onShare = async () => {
+    try {
+      await shareFolders([...selection.selectedIds]);
+      selection.clear();
+    } catch (err) {
+      // User dismissed the sheet, or none of the videos were shareable.
+      console.warn("[share] failed:", err);
+    }
+  };
+
   const confirmDelete = async () => {
     setConfirmOpen(false);
     try {
@@ -74,6 +85,15 @@ export default function FoldersScreen() {
       <ThemedText type="subtitle" className="flex-1">
         {selection.count} selected
       </ThemedText>
+      {Platform.OS === "android" && (
+        <Pressable
+          onPress={onShare}
+          hitSlop={10}
+          className="p-2 active:opacity-70"
+        >
+          <Icon name="share" size={24} color={colors.text} />
+        </Pressable>
+      )}
       <Pressable
         onPress={() => setConfirmOpen(true)}
         hitSlop={10}

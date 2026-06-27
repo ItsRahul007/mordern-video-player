@@ -1,0 +1,35 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="expo.modules.sharefiles" >
+4
+5    <uses-sdk android:minSdkVersion="24" />
+6
+7    <application>
+7-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:2:3-18:17
+8
+9        <!--
+10      A dedicated FileProvider so we can hand out content:// URIs for arbitrary
+11      files on shared storage when building the share intent. The authority is
+12      keyed off ${applicationId} so the dev and production package names don't
+13      collide, and stays distinct from expo-file-system's own provider.
+14        -->
+15        <provider
+15-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:9:5-17:16
+16            android:name="androidx.core.content.FileProvider"
+16-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:10:7-56
+17            android:authorities="${applicationId}.sharefilesprovider"
+17-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:11:7-64
+18            android:exported="false"
+18-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:12:7-31
+19            android:grantUriPermissions="true" >
+19-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:13:7-41
+20            <meta-data
+20-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:14:7-16:53
+21                android:name="android.support.FILE_PROVIDER_PATHS"
+21-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:15:9-59
+22                android:resource="@xml/share_files_paths" />
+22-->/Users/rahul/development/personal/mordern-video-player/modules/share-files/android/src/main/AndroidManifest.xml:16:9-50
+23        </provider>
+24    </application>
+25
+26</manifest>

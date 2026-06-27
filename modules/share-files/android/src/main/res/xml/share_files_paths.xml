@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The files we share live anywhere on shared storage (DCIM, Movies, Download,
+  WhatsApp folders, SD cards…). `external-path "."` maps the primary external
+  volume, and `root-path "/"` is the catch-all for everything else (e.g. removable
+  SD-card mount points outside the primary volume).
+-->
+<paths>
+  <external-path name="external_storage" path="." />
+  <root-path name="root" path="/" />
+</paths>

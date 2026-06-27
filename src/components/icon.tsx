@@ -43,6 +43,7 @@ const ICONS = {
   brightness: { ios: 'sun.max.fill', android: 'brightness_high', web: 'brightness_high' },
   rotate: { ios: 'rotate.right', android: 'screen_rotation', web: 'screen_rotation' },
   trash: { ios: 'trash', android: 'delete', web: 'delete' },
+  share: { ios: 'square.and.arrow.up', android: 'share', web: 'share' },
   xmark: { ios: 'xmark', android: 'close', web: 'close' },
   archive: { ios: 'doc.zipper', android: 'folder_zip', web: 'folder_zip' },
   unarchive: { ios: 'arrow.down.doc', android: 'unarchive', web: 'unarchive' },
