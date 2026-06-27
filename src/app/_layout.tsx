@@ -12,6 +12,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useShareIntent } from 'expo-share-intent';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { useTheme } from '@/hooks/use-theme';
@@ -29,6 +30,7 @@ function RootNavigator() {
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="index" />
         <Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="instagram" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="archives" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="status-saver" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen
@@ -49,6 +51,25 @@ function RootNavigator() {
 /** A file URI handed to us by another app (file manager "Open with"). */
 function isExternalVideoUrl(url: string | null): url is string {
   return !!url && (url.startsWith('content://') || url.startsWith('file://'));
+}
+
+/**
+ * Routes a link shared into the app (e.g. Instagram → Share → Video Player) to
+ * the Instagram downloader with the URL prefilled. Renders nothing.
+ */
+function ShareIntentHandler() {
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent();
+
+  useEffect(() => {
+    if (!hasShareIntent) return;
+    const link = shareIntent.webUrl ?? shareIntent.text ?? null;
+    if (link) {
+      router.push({ pathname: '/instagram', params: { sharedUrl: link } });
+    }
+    resetShareIntent();
+  }, [hasShareIntent, shareIntent, resetShareIntent]);
+
+  return null;
 }
 
 export default function RootLayout() {
@@ -82,6 +103,7 @@ export default function RootLayout() {
         <ThemeProvider>
           <SortProvider>
             <AnimatedSplashOverlay />
+            <ShareIntentHandler />
             <RootNavigator />
           </SortProvider>
         </ThemeProvider>

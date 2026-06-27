@@ -8,6 +8,7 @@ import type { ColorValue } from 'react-native';
  */
 const BRAND_ICONS = {
   whatsapp: 'whatsapp',
+  instagram: 'instagram',
 } as const;
 
 /**
@@ -47,6 +48,7 @@ const ICONS = {
   unarchive: { ios: 'arrow.down.doc', android: 'unarchive', web: 'unarchive' },
   status: { ios: 'circle.dashed', android: 'motion_photos_on', web: 'motion_photos_on' },
   save: { ios: 'arrow.down.circle', android: 'download', web: 'download' },
+  paste: { ios: 'doc.on.clipboard', android: 'content_paste', web: 'content_paste' },
   playCircle: { ios: 'play.circle.fill', android: 'play_circle', web: 'play_circle' },
   image: { ios: 'photo', android: 'image', web: 'image' },
 } as const;

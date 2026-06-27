@@ -113,6 +113,13 @@ export default function FoldersScreen() {
           </>
         )}
         <Pressable
+          onPress={() => router.push("/instagram")}
+          hitSlop={10}
+          className="p-1 active:opacity-70"
+        >
+          <Icon name="instagram" size={24} color={colors.text} />
+        </Pressable>
+        <Pressable
           onPress={() => router.push("/settings")}
           hitSlop={10}
           className="p-1 active:opacity-70"
