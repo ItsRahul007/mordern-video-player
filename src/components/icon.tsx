@@ -52,6 +52,7 @@ const ICONS = {
   paste: { ios: 'doc.on.clipboard', android: 'content_paste', web: 'content_paste' },
   playCircle: { ios: 'play.circle.fill', android: 'play_circle', web: 'play_circle' },
   image: { ios: 'photo', android: 'image', web: 'image' },
+  terabox: { ios: 'shippingbox.fill', android: 'cloud_download', web: 'cloud_download' },
 } as const;
 
 export type IconName = keyof typeof ICONS | keyof typeof BRAND_ICONS;

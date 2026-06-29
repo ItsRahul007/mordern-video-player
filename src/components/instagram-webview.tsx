@@ -11,12 +11,7 @@
  * New Architecture). The injected fetch posts the raw response back over the
  * message bridge; parsing happens in lib/instagram.ts.
  */
-import {
-  forwardRef,
-  useCallback,
-  useImperativeHandle,
-  useRef,
-} from "react";
+import { forwardRef, useCallback, useImperativeHandle, useRef } from "react";
 import type { StyleProp, ViewStyle } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
@@ -131,7 +126,6 @@ export const InstagramWebView = forwardRef<InstagramWebViewHandle, Props>(
         }
 
         if (msg.type === "auth") {
-          console.log(`[instagram] auth check: loggedIn=${msg.loggedIn}`);
           onConnectedChange(!!msg.loggedIn);
           return;
         }
