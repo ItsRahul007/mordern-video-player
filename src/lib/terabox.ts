@@ -22,6 +22,10 @@ import { Asset } from "expo-media-library";
 import { Platform } from "react-native";
 
 import { copyToPublicDir } from "@modules/all-files-access";
+import {
+  isBackgroundDownloadAvailable,
+  startBackgroundDownload,
+} from "@modules/media-downloader";
 
 /** Public folder, at the storage root, that downloads are saved into (Android). */
 export const SAVE_DIR = "/storage/emulated/0/Mordern Video Player/TeraBox";
@@ -337,6 +341,64 @@ function uniqueDestPath(name: string): string {
 /** Strip characters that aren't safe in a file name. */
 function sanitizeName(name: string): string {
   return name.replace(/[/\\:*?"<>|]/g, "_").trim() || "terabox";
+}
+
+/** Best-effort MIME from a filename's extension — labels the download notification. */
+function guessMimeType(name: string): string {
+  const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+  switch (ext) {
+    case "mp4":
+    case "m4v":
+      return "video/mp4";
+    case "mkv":
+      return "video/x-matroska";
+    case "webm":
+      return "video/webm";
+    case "mov":
+      return "video/quicktime";
+    case "avi":
+      return "video/x-msvideo";
+    case "ts":
+      return "video/mp2t";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    default:
+      return "video/*";
+  }
+}
+
+/**
+ * Whether TeraBox files can be saved as true background downloads (Android's
+ * DownloadManager: survives backgrounding, shows a system progress notification).
+ * When false, callers fall back to {@link saveTeraboxFile}'s foreground download.
+ */
+export function teraboxBackgroundDownloadAvailable(): boolean {
+  return isBackgroundDownloadAvailable();
+}
+
+/**
+ * Enqueue a TeraBox file as a system background download. The bytes are fetched by
+ * the OS via the proxy {@link teraboxStreamUrl} (so the Worker applies the session
+ * cookie), and the finished file is moved into {@link SAVE_DIR}. Returns the
+ * download id — match it against the progress/complete events from
+ * `@modules/media-downloader`. Android-only; throws {@link TeraboxError} on a bad
+ * file. The caller must hold the all-files grant first (see ensurePermission).
+ */
+export async function startTeraboxDownload(file: TeraboxFile): Promise<number> {
+  const url = teraboxStreamUrl(file);
+  if (!url) {
+    throw new TeraboxError("No download URL for this file.");
+  }
+  const name = sanitizeName(file.filename);
+  return startBackgroundDownload({
+    url,
+    fileName: name,
+    destPath: `${SAVE_DIR}/${name}`,
+    mimeType: guessMimeType(name),
+  });
 }
 
 /**

@@ -28,11 +28,18 @@ import {
   fetchShareInfo,
   formatSize,
   saveTeraboxFile,
+  startTeraboxDownload,
   TeraboxError,
+  teraboxBackgroundDownloadAvailable,
   type TeraboxFile,
   type TeraboxShare,
   teraboxStreamUrl,
 } from "@/lib/terabox";
+import {
+  addDownloadCompleteListener,
+  addDownloadProgressListener,
+  flushCompletedDownloads,
+} from "@modules/media-downloader";
 
 export default function TeraboxScreen() {
   const router = useRouter();
@@ -42,17 +49,19 @@ export default function TeraboxScreen() {
   // A link shared into the app (TeraBox → Share → Video Player).
   const { sharedUrl } = useLocalSearchParams<{ sharedUrl?: string }>();
 
+  // Android's DownloadManager gives real background downloads + a system progress
+  // notification; elsewhere (iOS) we fall back to a foreground in-app download.
+  const bgAvailable = teraboxBackgroundDownloadAvailable();
+
   const [url, setUrl] = useState(sharedUrl ?? "");
   const [fetching, setFetching] = useState(false);
   const [saving, setSaving] = useState(false);
   const [share, setShare] = useState<TeraboxShare | null>(null);
-  // Per-file state for the download buttons on multi-file shares.
+  // Per-file state for the foreground (iOS) download path — single-flight.
   const [savingIndex, setSavingIndex] = useState<number | null>(null);
   const [savedIndices, setSavedIndices] = useState<ReadonlySet<number>>(
     new Set(),
   );
-  // Whether every file has been saved (drives the "✅ Saved" button state).
-  const [savedAll, setSavedAll] = useState(false);
   // Error shown in a bottom sheet (replaces system alerts).
   const [errorSheet, setErrorSheet] = useState<{
     title: string;
@@ -60,17 +69,23 @@ export default function TeraboxScreen() {
   } | null>(null);
   // The Android all-files permission prompt (shown as a bottom sheet).
   const [permissionSheet, setPermissionSheet] = useState(false);
-  // Download progress for the file currently saving: { index, written, total }.
+  // Foreground download progress for the file currently saving (iOS path).
   const [dlProgress, setDlProgress] = useState<{
     index: number;
     written: number;
     total: number;
   } | null>(null);
+  // Background (DownloadManager) progress, keyed by file index — many at once.
+  const [bgProgress, setBgProgress] = useState<
+    Record<number, { written: number; total: number; pct: number }>
+  >({});
 
   const fetchingRef = useRef(false);
   const autoRan = useRef(false);
-  // Throttle progress state updates to whole-percent changes.
+  // Throttle foreground progress state updates to whole-percent changes.
   const lastPct = useRef(-1);
+  // Maps a live DownloadManager id back to the file index it's saving.
+  const idToIndex = useRef<Map<number, number>>(new Map());
 
   // Build an onProgress callback for the file at `index`.
   const progressFor = useCallback(
@@ -112,7 +127,8 @@ export default function TeraboxScreen() {
       // in-app TeraBox login is needed.
       const parsed = await fetchShareInfo(surl);
       setSavedIndices(new Set());
-      setSavedAll(false);
+      setBgProgress({});
+      idToIndex.current.clear();
       setShare(parsed);
     } catch (err) {
       const detail =
@@ -138,6 +154,43 @@ export default function TeraboxScreen() {
       void runFetch(sharedUrl);
     }
   }, [sharedUrl, runFetch]);
+
+  // Subscribe to the background DownloadManager (Android) and reconcile any
+  // downloads that finished while the screen wasn't mounted.
+  useEffect(() => {
+    if (!bgAvailable) return;
+    const progress = addDownloadProgressListener((e) => {
+      const index = idToIndex.current.get(e.id);
+      if (index === undefined) return;
+      setBgProgress((prev) => ({
+        ...prev,
+        [index]: { written: e.written, total: e.total, pct: e.pct },
+      }));
+    });
+    const complete = addDownloadCompleteListener((e) => {
+      const index = idToIndex.current.get(e.id);
+      if (index === undefined) return;
+      idToIndex.current.delete(e.id);
+      setBgProgress((prev) => {
+        const next = { ...prev };
+        delete next[index];
+        return next;
+      });
+      if (e.success) {
+        setSavedIndices((prev) => new Set(prev).add(index));
+      } else {
+        setErrorSheet({
+          title: "Save failed",
+          message: e.error ?? "Couldn't save this file. Please try again.",
+        });
+      }
+    });
+    void flushCompletedDownloads();
+    return () => {
+      progress?.remove();
+      complete?.remove();
+    };
+  }, [bgAvailable]);
 
   const onPaste = async () => {
     const text = await Clipboard.getStringAsync();
@@ -168,11 +221,44 @@ export default function TeraboxScreen() {
     return true;
   }, [granted, requestPermission]);
 
-  // Download every file; the button then reflects "✅ Saved".
+  // Enqueue one file as a background download (Android). Non-blocking: progress
+  // and completion arrive via the listeners above.
+  const enqueueBackground = async (index: number) => {
+    if (!share) return;
+    try {
+      const id = await startTeraboxDownload(share.files[index]);
+      idToIndex.current.set(id, index);
+      setBgProgress((prev) => ({
+        ...prev,
+        [index]: { written: 0, total: 0, pct: 0 },
+      }));
+    } catch (err) {
+      console.warn("[terabox] enqueue failed:", err);
+      setErrorSheet({
+        title: "Couldn't start download",
+        message:
+          err instanceof TeraboxError
+            ? err.message
+            : "Something went wrong. Please try again.",
+      });
+    }
+  };
+
+  // Download every file. On Android each is queued to the system DownloadManager
+  // (background + notification); on iOS they're downloaded in-app, sequentially.
   const onSaveAll = async () => {
-    if (!share || saving || savingIndex !== null) return;
+    if (!share) return;
     if (!(await ensurePermission())) return;
 
+    if (bgAvailable) {
+      for (const [index] of share.files.entries()) {
+        if (savedIndices.has(index) || bgProgress[index]) continue;
+        await enqueueBackground(index);
+      }
+      return;
+    }
+
+    if (saving || savingIndex !== null) return;
     setSaving(true);
     let saved = 0;
     const next = new Set(savedIndices);
@@ -192,14 +278,12 @@ export default function TeraboxScreen() {
     setSavedIndices(next);
     setSaving(false);
 
-    if (saved === share.files.length) {
-      setSavedAll(true);
-    } else if (saved === 0) {
+    if (saved === 0) {
       setErrorSheet({
         title: "Save failed",
         message: "Couldn't save to your device. Please try again.",
       });
-    } else {
+    } else if (saved < share.files.length) {
       setErrorSheet({
         title: "Partially saved",
         message: `Saved ${saved} of ${share.files.length} files. Tap the others to retry.`,
@@ -207,11 +291,19 @@ export default function TeraboxScreen() {
     }
   };
 
-  // Download a single file from a multi-file share; marks it with a checkmark.
+  // Download a single file; marks it with a checkmark once saved.
   const saveOne = async (index: number) => {
-    if (!share || saving || savingIndex !== null) return;
-    if (!(await ensurePermission())) return;
+    if (!share) return;
 
+    if (bgAvailable) {
+      if (savedIndices.has(index) || bgProgress[index]) return;
+      if (!(await ensurePermission())) return;
+      await enqueueBackground(index);
+      return;
+    }
+
+    if (saving || savingIndex !== null) return;
+    if (!(await ensurePermission())) return;
     setSavingIndex(index);
     lastPct.current = -1;
     try {
@@ -230,6 +322,35 @@ export default function TeraboxScreen() {
   };
 
   const fileCount = share?.files.length ?? 0;
+  // Every file saved → the "✅ Saved" button state (derived from both paths).
+  const savedAll = fileCount > 0 && savedIndices.size === fileCount;
+
+  // Whether file `index` is mid-download (either path).
+  const isDownloading = (index: number) =>
+    bgAvailable ? bgProgress[index] !== undefined : savingIndex === index;
+
+  // Live progress for file `index`, or null if unknown/not downloading.
+  const progressOf = (index: number) => {
+    if (bgAvailable) {
+      const p = bgProgress[index];
+      return p && p.total > 0 ? p : null;
+    }
+    if (savingIndex === index && dlProgress?.index === index && dlProgress.total > 0) {
+      return {
+        written: dlProgress.written,
+        total: dlProgress.total,
+        pct: Math.floor((dlProgress.written / dlProgress.total) * 100),
+      };
+    }
+    return null;
+  };
+
+  // The foreground path is single-flight, so it locks the whole list while one
+  // file saves. The background path runs files concurrently, so it never locks.
+  const anyDownloading = bgAvailable
+    ? Object.keys(bgProgress).length > 0
+    : saving || savingIndex !== null;
+  const listLocked = !bgAvailable && (saving || savingIndex !== null);
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top"]}>
@@ -306,110 +427,123 @@ export default function TeraboxScreen() {
               </ThemedText>
             )}
             <View className="gap-2">
-              {share.files.map((file, i) => (
-                <View
-                  key={`${file.fsId}-${i}`}
-                  className="flex-row items-center gap-3 overflow-hidden rounded-2xl bg-surface p-2.5"
-                >
-                  <View className="h-16 w-16 overflow-hidden rounded-xl bg-black/20">
+              {share.files.map((file, i) => {
+                const downloading = isDownloading(i);
+                const prog = progressOf(i);
+                const saved = savedIndices.has(i);
+                return (
+                  <View
+                    key={`${file.fsId}-${i}`}
+                    className="overflow-hidden rounded-2xl bg-surface"
+                  >
                     <Image
                       source={
                         file.thumbnail ? { uri: file.thumbnail } : undefined
                       }
-                      style={{ width: "100%", height: "100%" }}
+                      style={{ width: "100%", aspectRatio: 1 }}
                       contentFit="cover"
                       transition={150}
                     />
-                  </View>
-                  <View className="flex-1 gap-1">
-                    <ThemedText numberOfLines={2} className="text-sm">
-                      {file.filename}
-                    </ThemedText>
-                    {savingIndex === i &&
-                    dlProgress?.index === i &&
-                    dlProgress.total > 0 ? (
-                      <ThemedText type="muted" className="text-xs">
-                        {formatSize(dlProgress.written)} /{" "}
-                        {formatSize(dlProgress.total)} (
-                        {Math.floor((dlProgress.written / dlProgress.total) * 100)}%)
-                      </ThemedText>
-                    ) : (
-                      file.size > 0 && (
-                        <ThemedText type="muted" className="text-xs">
-                          {formatSize(file.size)}
-                        </ThemedText>
-                      )
-                    )}
-                  </View>
-                  {/* Actions: watch online + save. */}
-                  <View className="flex-row items-center gap-1">
+                    {/* Tap the preview to watch online (streamed via proxy). */}
                     <Pressable
                       onPress={() => onWatch(file)}
-                      disabled={saving || savingIndex !== null}
-                      hitSlop={6}
-                      className="h-11 w-11 items-center justify-center rounded-full bg-black/10 active:opacity-80"
+                      disabled={listLocked}
+                      className="absolute inset-0 items-center justify-center active:opacity-80"
                     >
-                      <Icon name="play" size={20} color={colors.accent} />
+                      <View className="h-14 w-14 items-center justify-center rounded-full bg-black/55">
+                        <Icon name="play" size={26} color="#ffffff" />
+                      </View>
                     </Pressable>
-                    <Pressable
-                      onPress={() => saveOne(i)}
-                      disabled={saving || savingIndex !== null}
-                      hitSlop={6}
-                      className="h-11 w-11 items-center justify-center rounded-full bg-black/10 active:opacity-80"
-                    >
-                      {savingIndex === i ? (
-                        dlProgress?.index === i && dlProgress.total > 0 ? (
-                          <ThemedText
-                            type="small"
-                            className="font-semibold"
-                            style={{ color: colors.accent }}
-                          >
-                            {Math.floor((dlProgress.written / dlProgress.total) * 100)}%
+                    {/* Filename, size and live progress — bottom-left. */}
+                    <View className="absolute inset-x-0 bottom-0 flex-row items-end justify-between gap-2 p-2.5">
+                      <View className="flex-1 rounded-xl bg-black/60 px-2.5 py-1.5">
+                        <ThemedText
+                          numberOfLines={1}
+                          className="text-xs font-medium text-white"
+                        >
+                          {file.filename}
+                        </ThemedText>
+                        {prog ? (
+                          <ThemedText className="text-xs text-white/80">
+                            {formatSize(prog.written)} /{" "}
+                            {formatSize(prog.total)} ({prog.pct}%)
                           </ThemedText>
                         ) : (
-                          <ActivityIndicator color={colors.accent} />
-                        )
-                      ) : savedIndices.has(i) ? (
-                        <Icon name="check" size={22} color="#4ade80" />
-                      ) : (
-                        <Icon name="save" size={22} color={colors.accent} />
+                          file.size > 0 && (
+                            <ThemedText className="text-xs text-white/80">
+                              {formatSize(file.size)}
+                            </ThemedText>
+                          )
+                        )}
+                      </View>
+                      {/* Per-file download — only for multi-file shares. */}
+                      {fileCount > 1 && (
+                        <Pressable
+                          onPress={() => saveOne(i)}
+                          disabled={listLocked || downloading || saved}
+                          hitSlop={8}
+                          className="h-11 w-11 items-center justify-center rounded-full bg-black/60 active:opacity-80"
+                        >
+                          {downloading ? (
+                            prog ? (
+                              <ThemedText
+                                type="small"
+                                className="font-semibold text-white"
+                              >
+                                {prog.pct}%
+                              </ThemedText>
+                            ) : (
+                              <ActivityIndicator color="#ffffff" />
+                            )
+                          ) : saved ? (
+                            <Icon name="check" size={22} color="#4ade80" />
+                          ) : (
+                            <Icon name="save" size={22} color="#ffffff" />
+                          )}
+                        </Pressable>
                       )}
-                    </Pressable>
+                    </View>
                   </View>
-                </View>
-              ))}
+                );
+              })}
             </View>
-            {fileCount > 1 && (
-              <Pressable
-                onPress={onSaveAll}
-                disabled={saving || savingIndex !== null || savedAll}
-                style={{ backgroundColor: colors.accent }}
-                className={`flex-row items-center justify-center gap-2 rounded-full py-3.5 active:opacity-80 ${
-                  saving || savingIndex !== null ? "opacity-50" : ""
-                }`}
-              >
-                {saving ? (
+            <Pressable
+              onPress={onSaveAll}
+              disabled={listLocked || savedAll}
+              style={{ backgroundColor: colors.accent }}
+              className={`flex-row items-center justify-center gap-2 rounded-full py-3.5 active:opacity-80 ${
+                listLocked ? "opacity-50" : ""
+              }`}
+            >
+              {savedAll ? (
+                <ThemedText className="font-semibold text-white">
+                  ✅ Saved
+                </ThemedText>
+              ) : anyDownloading ? (
+                <View className="flex-row items-center gap-2">
                   <ActivityIndicator color="#ffffff" />
-                ) : savedAll ? (
                   <ThemedText className="font-semibold text-white">
-                    ✅ Saved
+                    {bgAvailable ? "Downloading…" : "Saving…"}
                   </ThemedText>
-                ) : (
-                  <>
-                    <Icon name="save" size={20} color="#ffffff" />
-                    <ThemedText className="font-semibold text-white">
-                      Save all ({fileCount})
-                    </ThemedText>
-                  </>
-                )}
-              </Pressable>
-            )}
+                </View>
+              ) : (
+                <>
+                  <Icon name="save" size={20} color="#ffffff" />
+                  <ThemedText className="font-semibold text-white">
+                    Save {fileCount > 1 ? `all (${fileCount})` : ""}
+                  </ThemedText>
+                </>
+              )}
+            </Pressable>
           </View>
         )}
 
         <ThemedText type="muted" className="px-1 text-center leading-5">
-          Saves to a “Mordern Video Player” folder. Tip: share a link straight
-          from TeraBox, or paste a copied link above.
+          Saves to a “Mordern Video Player” folder.
+          {bgAvailable
+            ? " Downloads continue in the background — watch progress in your notifications."
+            : ""}{" "}
+          Tip: share a link straight from TeraBox, or paste a copied link above.
         </ThemedText>
       </ScrollView>
 
