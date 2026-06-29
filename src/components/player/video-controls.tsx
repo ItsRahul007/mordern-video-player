@@ -3,7 +3,13 @@ import * as Brightness from "expo-brightness";
 import { LinearGradient } from "expo-linear-gradient";
 import type { VideoPlayer } from "expo-video";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  StyleSheet,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import {
   Gesture,
   GestureDetector,
@@ -46,6 +52,9 @@ type VideoControlsProps = {
   /** When non-null the hardware volume buttons changed the level; show the
    *  custom volume indicator instead of the system overlay. */
   hardwareVolume?: number | null;
+  /** True while the player is fetching/buffering (e.g. a streamed source);
+   *  the center transport shows a spinner instead of the play/pause button. */
+  isLoading?: boolean;
 };
 
 const HIDE_DELAY = 3500;
@@ -100,6 +109,7 @@ export function VideoControls({
   onVisibilityChange,
   zoom,
   hardwareVolume,
+  isLoading,
 }: VideoControlsProps) {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
@@ -488,17 +498,23 @@ export function VideoControls({
                   disabled={!hasPrev}
                 />
               )}
-              <Pressable
-                onPress={togglePlay}
-                hitSlop={16}
-                className="active:opacity-70"
-              >
-                <Icon
-                  name={isPlaying ? "pause" : "play"}
-                  size={62}
-                  color="#ffffff"
-                />
-              </Pressable>
+              {isLoading ? (
+                <View className="h-[62px] w-[62px] items-center justify-center">
+                  <ActivityIndicator size="large" color="#ffffff" />
+                </View>
+              ) : (
+                <Pressable
+                  onPress={togglePlay}
+                  hitSlop={16}
+                  className="active:opacity-70"
+                >
+                  <Icon
+                    name={isPlaying ? "pause" : "play"}
+                    size={62}
+                    color="#ffffff"
+                  />
+                </Pressable>
+              )}
               {onNext && (
                 <IconButton
                   name="next"

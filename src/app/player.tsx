@@ -374,7 +374,20 @@ export default function PlayerScreen() {
           onVisibilityChange={setControlsVisible}
           zoom={zoom}
           hardwareVolume={hwVolume}
+          isLoading={status === "loading"}
         />
+      )}
+
+      {/* Buffering spinner for when the controls have auto-hidden (e.g. a
+          mid-playback rebuffer on a streamed source). While the controls are
+          visible the center transport shows its own spinner instead. */}
+      {current && status === "loading" && !controlsVisible && (
+        <View
+          pointerEvents="none"
+          className="absolute inset-0 items-center justify-center"
+        >
+          <ActivityIndicator size="large" color="#ffffff" />
+        </View>
       )}
     </View>
   );
