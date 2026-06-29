@@ -34,6 +34,10 @@ module.exports = {
         // the scoped READ_MEDIA_* permissions can't see. Granted via system
         // settings (see use-storage-permission.ts).
         "android.permission.MANAGE_EXTERNAL_STORAGE",
+        // Let DownloadManager show its background-download progress notification
+        // on Android 13+ (see modules/media-downloader).
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.ACCESS_NETWORK_STATE",
       ],
       package: IS_DEV
         ? "com.rahulghosh.vplayer"

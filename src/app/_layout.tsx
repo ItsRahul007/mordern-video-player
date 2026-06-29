@@ -21,6 +21,7 @@ import { playerPrefs } from '@/lib/player-prefs';
 import { QueryProvider } from '@/providers/query-provider';
 import { SortProvider } from '@/providers/sort-provider';
 import { ThemeProvider } from '@/providers/theme-provider';
+import { isTeraboxUrl } from '@/lib/terabox';
 
 function RootNavigator() {
   const { scheme } = useTheme();
@@ -31,6 +32,7 @@ function RootNavigator() {
         <Stack.Screen name="index" />
         <Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="instagram" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="terabox" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="archives" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="status-saver" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen
@@ -54,8 +56,10 @@ function isExternalVideoUrl(url: string | null): url is string {
 }
 
 /**
- * Routes a link shared into the app (e.g. Instagram → Share → Video Player) to
- * the Instagram downloader with the URL prefilled. Renders nothing.
+ * Routes a link shared into the app (e.g. Instagram/TeraBox → Share → Video
+ * Player) to the matching downloader with the URL prefilled. TeraBox mirror
+ * hosts go to the TeraBox screen; everything else falls through to Instagram.
+ * Renders nothing.
  */
 function ShareIntentHandler() {
   const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent();
@@ -64,7 +68,8 @@ function ShareIntentHandler() {
     if (!hasShareIntent) return;
     const link = shareIntent.webUrl ?? shareIntent.text ?? null;
     if (link) {
-      router.push({ pathname: '/instagram', params: { sharedUrl: link } });
+      const pathname = isTeraboxUrl(link) ? '/terabox' : '/instagram';
+      router.push({ pathname, params: { sharedUrl: link } });
     }
     resetShareIntent();
   }, [hasShareIntent, shareIntent, resetShareIntent]);

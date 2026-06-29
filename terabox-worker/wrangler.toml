@@ -1,0 +1,7 @@
+name = "terabox-proxy"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# Secrets (do NOT put these here — set them with `wrangler secret put`):
+#   TERABOX_COOKIE   required — your TeraBox cookie string, e.g. "ndus=XXXX"
+#   PROXY_TOKEN      optional — shared secret to gate access to the proxy

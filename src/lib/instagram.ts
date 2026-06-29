@@ -22,6 +22,10 @@ import { Asset } from "expo-media-library";
 import { Platform } from "react-native";
 
 import { copyToPublicDir } from "@modules/all-files-access";
+import {
+  isBackgroundDownloadAvailable,
+  startBackgroundDownload,
+} from "@modules/media-downloader";
 
 /** Public folder, at the storage root, that downloads are saved into (Android). */
 export const SAVE_DIR = "/storage/emulated/0/Mordern Video Player/Instagram";
@@ -204,6 +208,53 @@ export function parseMediaInfoResponse(
   return { shortcode, username: item.user?.username ?? null, items };
 }
 
+/** Human-readable byte size for the UI (e.g. "12.4 MB"). */
+export function formatSize(bytes: number): string {
+  if (!bytes) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** The saved file's name for an item — `baseName` with the type's extension. */
+function itemFileNameWithExt(item: InstagramItem, baseName: string): string {
+  return `${baseName}.${item.type === "video" ? "mp4" : "jpg"}`;
+}
+
+/**
+ * Whether Instagram items can be saved as true background downloads (Android's
+ * DownloadManager: survives backgrounding, shows a system progress notification).
+ * When false, callers fall back to {@link saveInstagramItem}'s foreground download.
+ */
+export function instagramBackgroundDownloadAvailable(): boolean {
+  return isBackgroundDownloadAvailable();
+}
+
+/**
+ * Enqueue an Instagram item as a system background download. The signed CDN URL is
+ * fetched by the OS directly (no cookies needed) and the finished file is moved
+ * into {@link SAVE_DIR}. Returns the download id — match it against the
+ * progress/complete events from `@modules/media-downloader`. Android-only; the
+ * caller must hold the all-files grant first (see ensurePermission).
+ */
+export async function startInstagramDownload(
+  item: InstagramItem,
+  baseName: string,
+): Promise<number> {
+  const filename = itemFileNameWithExt(item, baseName);
+  return startBackgroundDownload({
+    url: item.url,
+    fileName: filename,
+    destPath: `${SAVE_DIR}/${filename}`,
+    mimeType: item.type === "video" ? "video/mp4" : "image/jpeg",
+  });
+}
+
 /** Cache dir downloads land in before being moved to their final location. */
 function cacheDir(): Directory {
   const dir = new Directory(Paths.cache, "instagram");
@@ -255,7 +306,7 @@ export async function saveInstagramItem(
   item: InstagramItem,
   baseName: string,
 ): Promise<string> {
-  const filename = `${baseName}.${item.type === "video" ? "mp4" : "jpg"}`;
+  const filename = itemFileNameWithExt(item, baseName);
   console.log(`[instagram] downloading ${filename} (${item.type})`);
 
   let downloaded: File | null = null;
