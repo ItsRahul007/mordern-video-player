@@ -28,13 +28,21 @@ import {
 } from "@/hooks/use-storage-permission";
 import { useTheme } from "@/hooks/use-theme";
 import {
+  formatSize,
+  instagramBackgroundDownloadAvailable,
   InstagramError,
   type InstagramMedia,
   parseMediaInfoResponse,
   resolveShortcode,
   saveInstagramItem,
   shortcodeToMediaId,
+  startInstagramDownload,
 } from "@/lib/instagram";
+import {
+  addDownloadCompleteListener,
+  addDownloadProgressListener,
+  flushCompletedDownloads,
+} from "@modules/media-downloader";
 
 export default function InstagramScreen() {
   const router = useRouter();
@@ -44,6 +52,10 @@ export default function InstagramScreen() {
   // A link shared into the app (Instagram → Share → Video Player).
   const { sharedUrl } = useLocalSearchParams<{ sharedUrl?: string }>();
 
+  // Android's DownloadManager gives real background downloads + a system progress
+  // notification; elsewhere (iOS) we fall back to a foreground in-app download.
+  const bgAvailable = instagramBackgroundDownloadAvailable();
+
   const webRef = useRef<InstagramWebViewHandle>(null);
   // null = still determining (initial page load), false = needs login.
   const [connected, setConnected] = useState<boolean | null>(null);
@@ -52,13 +64,11 @@ export default function InstagramScreen() {
   const [fetching, setFetching] = useState(false);
   const [saving, setSaving] = useState(false);
   const [media, setMedia] = useState<InstagramMedia | null>(null);
-  // Per-item state for the download buttons shown on multi-item (carousel) posts.
+  // Per-item state for the foreground (iOS) download path — single-flight.
   const [savingIndex, setSavingIndex] = useState<number | null>(null);
   const [savedIndices, setSavedIndices] = useState<ReadonlySet<number>>(
     new Set(),
   );
-  // Whether every item has been saved (drives the "✅ Saved" button state).
-  const [savedAll, setSavedAll] = useState(false);
   // Error shown in a bottom sheet (replaces system alerts).
   const [errorSheet, setErrorSheet] = useState<{
     title: string;
@@ -66,9 +76,15 @@ export default function InstagramScreen() {
   } | null>(null);
   // The Android all-files permission prompt (shown as a bottom sheet).
   const [permissionSheet, setPermissionSheet] = useState(false);
+  // Background (DownloadManager) progress, keyed by item index — many at once.
+  const [bgProgress, setBgProgress] = useState<
+    Record<number, { written: number; total: number; pct: number }>
+  >({});
 
   const fetchingRef = useRef(false);
   const autoRan = useRef(false);
+  // Maps a live DownloadManager id back to the item index it's saving.
+  const idToIndex = useRef<Map<number, number>>(new Map());
 
   const onConnectedChange = useCallback((value: boolean) => {
     setConnected(value);
@@ -89,7 +105,8 @@ export default function InstagramScreen() {
       }
       const body = await webRef.current.fetchMedia(mediaId);
       setSavedIndices(new Set());
-      setSavedAll(false);
+      setBgProgress({});
+      idToIndex.current.clear();
       setMedia(parseMediaInfoResponse(body, shortcode));
     } catch (err) {
       console.warn(
@@ -116,6 +133,43 @@ export default function InstagramScreen() {
       void runFetch(sharedUrl);
     }
   }, [connected, sharedUrl, runFetch]);
+
+  // Subscribe to the background DownloadManager (Android) and reconcile any
+  // downloads that finished while the screen wasn't mounted.
+  useEffect(() => {
+    if (!bgAvailable) return;
+    const progress = addDownloadProgressListener((e) => {
+      const index = idToIndex.current.get(e.id);
+      if (index === undefined) return;
+      setBgProgress((prev) => ({
+        ...prev,
+        [index]: { written: e.written, total: e.total, pct: e.pct },
+      }));
+    });
+    const complete = addDownloadCompleteListener((e) => {
+      const index = idToIndex.current.get(e.id);
+      if (index === undefined) return;
+      idToIndex.current.delete(e.id);
+      setBgProgress((prev) => {
+        const next = { ...prev };
+        delete next[index];
+        return next;
+      });
+      if (e.success) {
+        setSavedIndices((prev) => new Set(prev).add(index));
+      } else {
+        setErrorSheet({
+          title: "Save failed",
+          message: e.error ?? "Couldn't save this item. Please try again.",
+        });
+      }
+    });
+    void flushCompletedDownloads();
+    return () => {
+      progress?.remove();
+      complete?.remove();
+    };
+  }, [bgAvailable]);
 
   const onPaste = async () => {
     const text = await Clipboard.getStringAsync();
@@ -152,11 +206,47 @@ export default function InstagramScreen() {
   const itemFileName = (m: InstagramMedia, index: number) =>
     m.items.length > 1 ? `${baseName(m)}_${index + 1}` : baseName(m);
 
-  // Download every item; the button then reflects "✅ Saved".
+  // Enqueue one item as a background download (Android). Non-blocking: progress
+  // and completion arrive via the listeners above.
+  const enqueueBackground = async (index: number) => {
+    if (!media) return;
+    try {
+      const id = await startInstagramDownload(
+        media.items[index],
+        itemFileName(media, index),
+      );
+      idToIndex.current.set(id, index);
+      setBgProgress((prev) => ({
+        ...prev,
+        [index]: { written: 0, total: 0, pct: 0 },
+      }));
+    } catch (err) {
+      console.warn("[instagram] enqueue failed:", err);
+      setErrorSheet({
+        title: "Couldn't start download",
+        message:
+          err instanceof InstagramError
+            ? err.message
+            : "Something went wrong. Please try again.",
+      });
+    }
+  };
+
+  // Download every item. On Android each is queued to the system DownloadManager
+  // (background + notification); on iOS they're downloaded in-app, sequentially.
   const onSaveAll = async () => {
-    if (!media || saving || savingIndex !== null) return;
+    if (!media) return;
     if (!(await ensurePermission())) return;
 
+    if (bgAvailable) {
+      for (const [index] of media.items.entries()) {
+        if (savedIndices.has(index) || bgProgress[index]) continue;
+        await enqueueBackground(index);
+      }
+      return;
+    }
+
+    if (saving || savingIndex !== null) return;
     setSaving(true);
     let saved = 0;
     const next = new Set(savedIndices);
@@ -172,14 +262,12 @@ export default function InstagramScreen() {
     setSavedIndices(next);
     setSaving(false);
 
-    if (saved === media.items.length) {
-      setSavedAll(true);
-    } else if (saved === 0) {
+    if (saved === 0) {
       setErrorSheet({
         title: "Save failed",
         message: "Couldn't save to your device. Please try again.",
       });
-    } else {
+    } else if (saved < media.items.length) {
       setErrorSheet({
         title: "Partially saved",
         message: `Saved ${saved} of ${media.items.length} items. Tap the others to retry.`,
@@ -187,11 +275,19 @@ export default function InstagramScreen() {
     }
   };
 
-  // Download a single item from a multi-item post; marks it with a checkmark.
+  // Download a single item; marks it with a checkmark once saved.
   const saveOne = async (index: number) => {
-    if (!media || saving || savingIndex !== null) return;
-    if (!(await ensurePermission())) return;
+    if (!media) return;
 
+    if (bgAvailable) {
+      if (savedIndices.has(index) || bgProgress[index]) return;
+      if (!(await ensurePermission())) return;
+      await enqueueBackground(index);
+      return;
+    }
+
+    if (saving || savingIndex !== null) return;
+    if (!(await ensurePermission())) return;
     setSavingIndex(index);
     try {
       await saveInstagramItem(media.items[index], itemFileName(media, index));
@@ -209,6 +305,26 @@ export default function InstagramScreen() {
 
   const loginActive = connected === false;
   const itemCount = media?.items.length ?? 0;
+  // Every item saved → the "✅ Saved" button state (derived from both paths).
+  const savedAll = itemCount > 0 && savedIndices.size === itemCount;
+
+  // Whether item `index` is mid-download (either path).
+  const isDownloading = (index: number) =>
+    bgAvailable ? bgProgress[index] !== undefined : savingIndex === index;
+
+  // Live progress for item `index`, or null if unknown/not downloading.
+  const progressOf = (index: number) => {
+    if (!bgAvailable) return null;
+    const p = bgProgress[index];
+    return p && p.total > 0 ? p : null;
+  };
+
+  // The foreground path is single-flight, so it locks the whole list while one
+  // item saves. The background path runs items concurrently, so it never locks.
+  const anyDownloading = bgAvailable
+    ? Object.keys(bgProgress).length > 0
+    : saving || savingIndex !== null;
+  const listLocked = !bgAvailable && (saving || savingIndex !== null);
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top"]}>
@@ -296,66 +412,97 @@ export default function InstagramScreen() {
                 </ThemedText>
               )}
               <View className="gap-2">
-                {media.items.map((item, i) => (
-                  <View
-                    key={`${item.url}-${i}`}
-                    className="overflow-hidden rounded-2xl bg-surface"
-                  >
-                    <Image
-                      source={
-                        item.thumbnail ? { uri: item.thumbnail } : undefined
-                      }
-                      style={{ width: "100%", aspectRatio: 1 }}
-                      contentFit="cover"
-                      transition={150}
-                    />
-                    <View className="absolute left-2 top-2 flex-row items-center gap-1 rounded-full bg-black/60 px-2 py-1">
-                      <Icon
-                        name={item.type === "video" ? "play" : "image"}
-                        size={12}
-                        color="#ffffff"
+                {media.items.map((item, i) => {
+                  const downloading = isDownloading(i);
+                  const prog = progressOf(i);
+                  const saved = savedIndices.has(i);
+                  return (
+                    <View
+                      key={`${item.url}-${i}`}
+                      className="overflow-hidden rounded-2xl bg-surface"
+                    >
+                      <Image
+                        source={
+                          item.thumbnail ? { uri: item.thumbnail } : undefined
+                        }
+                        style={{ width: "100%", aspectRatio: 1 }}
+                        contentFit="cover"
+                        transition={150}
                       />
-                      <ThemedText
-                        type="small"
-                        className="font-semibold text-white"
-                      >
-                        {item.type === "video" ? "Video" : "Photo"}
-                      </ThemedText>
+                      <View className="absolute left-2 top-2 flex-row items-center gap-1 rounded-full bg-black/60 px-2 py-1">
+                        <Icon
+                          name={item.type === "video" ? "play" : "image"}
+                          size={12}
+                          color="#ffffff"
+                        />
+                        <ThemedText
+                          type="small"
+                          className="font-semibold text-white"
+                        >
+                          {item.type === "video" ? "Video" : "Photo"}
+                        </ThemedText>
+                      </View>
+                      {/* Live download progress — bottom-left, while saving. */}
+                      {prog && (
+                        <View className="absolute bottom-2 left-2 rounded-full bg-black/60 px-2.5 py-1">
+                          <ThemedText
+                            type="small"
+                            className="font-semibold text-white"
+                          >
+                            {formatSize(prog.written)} / {formatSize(prog.total)}{" "}
+                            ({prog.pct}%)
+                          </ThemedText>
+                        </View>
+                      )}
+                      {/* Per-item download button — only for multi-item posts. */}
+                      {itemCount > 1 && (
+                        <Pressable
+                          onPress={() => saveOne(i)}
+                          disabled={listLocked || downloading || saved}
+                          hitSlop={8}
+                          className="absolute bottom-2 right-2 h-11 w-11 items-center justify-center rounded-full bg-black/60 active:opacity-80"
+                        >
+                          {downloading ? (
+                            prog ? (
+                              <ThemedText
+                                type="small"
+                                className="font-semibold text-white"
+                              >
+                                {prog.pct}%
+                              </ThemedText>
+                            ) : (
+                              <ActivityIndicator color="#ffffff" />
+                            )
+                          ) : saved ? (
+                            <Icon name="check" size={22} color="#4ade80" />
+                          ) : (
+                            <Icon name="save" size={22} color="#ffffff" />
+                          )}
+                        </Pressable>
+                      )}
                     </View>
-                    {/* Per-item download button — only for multi-item posts. */}
-                    {itemCount > 1 && (
-                      <Pressable
-                        onPress={() => saveOne(i)}
-                        disabled={saving || savingIndex !== null}
-                        hitSlop={8}
-                        className="absolute bottom-2 right-2 h-11 w-11 items-center justify-center rounded-full bg-black/60 active:opacity-80"
-                      >
-                        {savingIndex === i ? (
-                          <ActivityIndicator color="#ffffff" />
-                        ) : savedIndices.has(i) ? (
-                          <Icon name="check" size={22} color="#4ade80" />
-                        ) : (
-                          <Icon name="save" size={22} color="#ffffff" />
-                        )}
-                      </Pressable>
-                    )}
-                  </View>
-                ))}
+                  );
+                })}
               </View>
               <Pressable
                 onPress={onSaveAll}
-                disabled={saving || savingIndex !== null || savedAll}
+                disabled={listLocked || savedAll}
                 style={{ backgroundColor: colors.accent }}
                 className={`flex-row items-center justify-center gap-2 rounded-full py-3.5 active:opacity-80 ${
-                  saving || savingIndex !== null ? "opacity-50" : ""
+                  listLocked ? "opacity-50" : ""
                 }`}
               >
-                {saving ? (
-                  <ActivityIndicator color="#ffffff" />
-                ) : savedAll ? (
+                {savedAll ? (
                   <ThemedText className="font-semibold text-white">
                     ✅ Saved
                   </ThemedText>
+                ) : anyDownloading ? (
+                  <View className="flex-row items-center gap-2">
+                    <ActivityIndicator color="#ffffff" />
+                    <ThemedText className="font-semibold text-white">
+                      {bgAvailable ? "Downloading…" : "Saving…"}
+                    </ThemedText>
+                  </View>
                 ) : (
                   <>
                     <Icon name="save" size={20} color="#ffffff" />
@@ -369,8 +516,12 @@ export default function InstagramScreen() {
           )}
 
           <ThemedText type="muted" className="px-1 text-center leading-5">
-            Saves to a “Mordern Video Player” folder. Tip: share a reel straight
-            from Instagram, or paste a copied link above.
+            Saves to a “Mordern Video Player” folder.
+            {bgAvailable
+              ? " Downloads continue in the background — watch progress in your notifications."
+              : ""}{" "}
+            Tip: share a reel straight from Instagram, or paste a copied link
+            above.
           </ThemedText>
         </ScrollView>
       )}
