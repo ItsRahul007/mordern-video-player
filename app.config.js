@@ -1,4 +1,5 @@
-const IS_DEV = process.env.APP_VARIANT === "development";
+const APP_VARIANT = process.env.APP_VARIANT ?? "development";
+const IS_DEV = APP_VARIANT === "development";
 const { version } = require("./package.json");
 
 module.exports = {
@@ -7,6 +8,22 @@ module.exports = {
     slug: "video-player",
     version,
     orientation: "default",
+    // OTA updates via EAS Update. The fingerprint policy ties each update to
+    // the native build's fingerprint, so JS-only changes ship over-the-air
+    // while native changes (new modules, plugins, permissions) require a fresh
+    // build that bumps the runtime version automatically.
+    runtimeVersion: {
+      policy: "fingerprint",
+    },
+    updates: {
+      url: "https://u.expo.dev/bdc45493-6f5f-403c-9212-16ecbbe1c9eb",
+      // Local (non-EAS-Build) builds don't get the channel baked in from
+      // eas.json, so set it explicitly here keyed off APP_VARIANT. This is
+      // what tells the installed app which update channel to pull from.
+      requestHeaders: {
+        "expo-channel-name": APP_VARIANT,
+      },
+    },
     icon: "./assets/images/app-logo.png",
     scheme: "mordernvideoplayer",
     userInterfaceStyle: "automatic",
