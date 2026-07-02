@@ -42,6 +42,68 @@ export const TERABOX_PROXY_URL =
 const TERABOX_PROXY_TOKEN =
   process.env.EXPO_PUBLIC_TERABOX_PROXY_TOKEN ?? "";
 
+/** Transcoded HLS quality variants. 480 works on any account; 720/1080 need VIP. */
+export type TeraboxQuality = "480" | "720" | "1080";
+
+/**
+ * How to fetch the bytes:
+ * - `"hls"`   — the transcoded HLS stream (fast, unthrottled CDN). Quality is
+ *               capped at the transcode and the file is a `.ts` container.
+ * - `"original"` — the original file via its signed dlink. Full quality, but
+ *               TeraBox throttles it to ~20-30 KB/s for non-VIP accounts.
+ */
+export type TeraboxDownloadMode = "hls" | "original";
+
+/**
+ * URL of the transcoded HLS manifest for online playback — the same fast path
+ * the TeraBox site itself uses (the original-file dlink is rate-capped for
+ * non-VIP accounts). The Worker returns an `.m3u8` whose segments are proxied
+ * back through it, so the player needs no special headers. Empty string when no
+ * proxy is configured or the file has no surl (callers fall back to the dlink).
+ */
+export function teraboxHlsUrl(
+  file: TeraboxFile,
+  quality: TeraboxQuality = "480",
+): string {
+  if (!TERABOX_PROXY_URL || !file.surl) return "";
+  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
+  const token = TERABOX_PROXY_TOKEN
+    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
+    : "";
+  return (
+    `${base}/hls/playlist.m3u8?surl=${encodeURIComponent(file.surl)}` +
+    `&fs_id=${encodeURIComponent(file.fsId)}&hls=1&quality=${quality}${token}`
+  );
+}
+
+/**
+ * The URL the download fetches from, per {@link TeraboxDownloadMode}. HLS mode
+ * hits the Worker's server-side segment-concat endpoint (one MPEG-TS stream);
+ * original mode uses {@link teraboxStreamUrl} (the dlink via the proxy).
+ */
+function teraboxDownloadUrl(
+  file: TeraboxFile,
+  mode: TeraboxDownloadMode,
+  quality: TeraboxQuality,
+): string {
+  if (mode === "original") return teraboxStreamUrl(file);
+  if (!TERABOX_PROXY_URL || !file.surl) return "";
+  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
+  const token = TERABOX_PROXY_TOKEN
+    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
+    : "";
+  return (
+    `${base}/hls/download.ts?surl=${encodeURIComponent(file.surl)}` +
+    `&fs_id=${encodeURIComponent(file.fsId)}&hls=1&download=1&quality=${quality}${token}`
+  );
+}
+
+/** The saved file name for a download: HLS downloads are `.ts` containers. */
+function downloadFileName(file: TeraboxFile, mode: TeraboxDownloadMode): string {
+  const name = sanitizeName(file.filename);
+  return mode === "hls" ? `${name.replace(/\.[^.]+$/, "")}.ts` : name;
+}
+
 /**
  * The proxy URL that streams a file — used both for downloading and for online
  * playback (the Worker serves the bytes with the session cookie). Returns the
@@ -282,19 +344,42 @@ export async function fetchShareInfo(surl: string): Promise<TeraboxShare> {
   const token = TERABOX_PROXY_TOKEN
     ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
     : "";
-  const url = `${base}/?surl=${encodeURIComponent(surl)}&list=1${token}`;
+  // Cache-bust: the resolve URL is otherwise identical per share, so Android's
+  // OkHttp response cache can serve a *stale* body — including a transient error
+  // page from an earlier failed resolve — even after the Worker starts returning
+  // success. The nonce keeps every fetch unique; no-store is a belt-and-braces
+  // hint for platforms that honour it.
+  const url = `${base}/?surl=${encodeURIComponent(surl)}&list=1${token}&_=${Date.now()}`;
 
   let text: string;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+    });
     text = await res.text();
   } catch (err) {
     console.warn("[terabox] info fetch failed:", String(err));
     throw new TeraboxError("Couldn't reach the TeraBox proxy. Check your connection.");
   }
   console.log(`[terabox] info response: ${text.length} chars`);
-  // The Worker returns the shorturlinfo-style { errno, list } body, so the same
-  // parser handles it. On a resolve error it returns { stage, errno, … }.
+  // The Worker returns the shorturlinfo-style { errno, list } body on success, so
+  // the same parser handles it. But a resolve *failure* comes back as
+  // { ok: false, stage, errno, … } at HTTP 200 — which the parser would otherwise
+  // mistake for an empty share ("no downloadable files"). Detect it here so a
+  // transient, retryable Worker hiccup reports honestly.
+  try {
+    const probe = JSON.parse(text) as { ok?: boolean; stage?: string };
+    if (probe.ok === false) {
+      console.warn(`[terabox] worker resolve failed at stage=${probe.stage}:`, snippet(text));
+      throw new TeraboxError(
+        "Couldn't read this share right now. Please try fetching again.",
+      );
+    }
+  } catch (err) {
+    if (err instanceof TeraboxError) throw err;
+    // Not JSON (or not the failure envelope) — let the main parser handle it.
+  }
   return parseShareListResponse(text, surl);
 }
 
@@ -387,12 +472,16 @@ export function teraboxBackgroundDownloadAvailable(): boolean {
  * `@modules/media-downloader`. Android-only; throws {@link TeraboxError} on a bad
  * file. The caller must hold the all-files grant first (see ensurePermission).
  */
-export async function startTeraboxDownload(file: TeraboxFile): Promise<number> {
-  const url = teraboxStreamUrl(file);
+export async function startTeraboxDownload(
+  file: TeraboxFile,
+  mode: TeraboxDownloadMode = "hls",
+  quality: TeraboxQuality = "480",
+): Promise<number> {
+  const url = teraboxDownloadUrl(file, mode, quality);
   if (!url) {
     throw new TeraboxError("No download URL for this file.");
   }
-  const name = sanitizeName(file.filename);
+  const name = downloadFileName(file, mode);
   return startBackgroundDownload({
     url,
     fileName: name,
@@ -410,17 +499,22 @@ export async function startTeraboxDownload(file: TeraboxFile): Promise<number> {
  */
 export async function saveTeraboxFile(
   file: TeraboxFile,
+  mode: TeraboxDownloadMode = "hls",
   onProgress?: (written: number, total: number) => void,
+  quality: TeraboxQuality = "480",
 ): Promise<string> {
-  const filename = sanitizeName(file.filename);
+  const filename = downloadFileName(file, mode);
   const emit = (m: string) => console.log(`[terabox] ${m}`);
 
   const usingProxy = !!TERABOX_PROXY_URL;
-  const downloadUrl = teraboxStreamUrl(file);
+  const downloadUrl = teraboxDownloadUrl(file, mode, quality);
+  if (!downloadUrl) {
+    throw new TeraboxError("No download URL for this file.");
+  }
   // Via the proxy, the Worker sets the cookie/UA/Referer itself; a direct
   // download still needs the browser-like headers (and usually 403s anyway).
   const headers = usingProxy ? {} : downloadHeaders(file.dlink);
-  emit(`download "${filename}" (${formatSize(file.size) || "?"}) via ${usingProxy ? "proxy" : "dlink"}`);
+  emit(`download "${filename}" (${formatSize(file.size) || "?"}) via ${mode}/${usingProxy ? "proxy" : "dlink"}`);
 
   let downloaded: File | null = null;
   try {

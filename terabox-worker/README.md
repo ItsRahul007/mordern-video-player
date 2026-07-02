@@ -48,9 +48,35 @@ EXPO_PUBLIC_TERABOX_PROXY_TOKEN=<the same random string>
 Rebuild the app. The TeraBox downloader will route the file download through the
 Worker; resolving the share (file list, thumbnail, size) still happens on-device.
 
+## Endpoints
+
+| Request | Returns |
+|---|---|
+| `GET /?surl=<id>&list=1` | The share's file list (JSON). |
+| `GET /?surl=<id>&fs_id=<id>` | The **original file** streamed via its dlink (full quality; TeraBox throttles this to ~20-30 KB/s for non-VIP). |
+| `GET /?surl=<id>&fs_id=<id>&hls=1` | The transcoded **HLS manifest** (`.m3u8`) for online playback. Segments are rewritten to route back through the Worker (`?seg=`). Fast, unthrottled — this is the path the TeraBox site itself plays. Add `&quality=720` / `1080` (needs a VIP cookie). |
+| `GET /?surl=<id>&fs_id=<id>&hls=1&download=1` | The HLS segments concatenated into one **MPEG-TS** file (`.ts`), streamed as an attachment. Fast download at transcode quality. |
+| `GET /?seg=<encoded-segment-url>` | Internal — proxies a transcode-CDN segment with the Referer/cookie. |
+| `GET /?url=<dlink>` | Proxy a raw dlink. |
+| `GET /?debug=1` | Cookie health check. |
+
+> **Why HLS?** TeraBox deliberately rate-caps the original-file dlink for non-VIP
+> accounts, so both direct downloads and dlink-based playback crawl at ~20-30 KB/s.
+> The site's own player instead streams a transcoded H.264 variant from a fast CDN
+> (`/share/streaming` → `.m3u8`). The `hls=1` endpoints use that same path, so watch
+> is smooth and the fast download runs at full CDN speed — at the cost of transcode
+> quality (480p by default; higher needs VIP) and a `.ts` container (no ffmpeg in a
+> Worker to re-mux to MP4).
+
 ## Test
 
 ```sh
-# Should stream the file (replace with a real dlink from the app logs):
+# Original file via dlink (slow for non-VIP):
 curl -L "https://terabox-proxy.<you>.workers.dev/?url=<URL-ENCODED-DLINK>" -o test.mp4
+
+# HLS manifest (should print #EXTM3U...); if it prints JSON, check `wrangler tail`:
+curl "https://terabox-proxy.<you>.workers.dev/?surl=<ID>&fs_id=<FSID>&hls=1"
+
+# Fast transcoded download:
+curl -L "https://terabox-proxy.<you>.workers.dev/?surl=<ID>&fs_id=<FSID>&hls=1&download=1" -o fast.ts
 ```

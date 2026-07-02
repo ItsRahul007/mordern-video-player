@@ -29,9 +29,11 @@ import {
   formatSize,
   saveTeraboxFile,
   startTeraboxDownload,
+  type TeraboxDownloadMode,
   TeraboxError,
   teraboxBackgroundDownloadAvailable,
   type TeraboxFile,
+  teraboxHlsUrl,
   type TeraboxShare,
   teraboxStreamUrl,
 } from "@/lib/terabox";
@@ -55,6 +57,9 @@ export default function TeraboxScreen() {
 
   const [url, setUrl] = useState(sharedUrl ?? "");
   const [fetching, setFetching] = useState(false);
+  // Download source: "hls" is the fast transcoded stream (default); "original"
+  // is the full-quality file but TeraBox throttles it hard for non-VIP accounts.
+  const [downloadMode, setDownloadMode] = useState<TeraboxDownloadMode>("hls");
   const [saving, setSaving] = useState(false);
   const [share, setShare] = useState<TeraboxShare | null>(null);
   // Per-file state for the foreground (iOS) download path — single-flight.
@@ -98,9 +103,10 @@ export default function TeraboxScreen() {
     [],
   );
 
-  // Open the video for online playback — streamed through the proxy Worker.
+  // Open the video for online playback. Prefer the fast transcoded HLS stream
+  // (what the TeraBox site itself plays); fall back to the throttled dlink.
   const onWatch = (file: TeraboxFile) => {
-    const uri = teraboxStreamUrl(file);
+    const uri = teraboxHlsUrl(file) || teraboxStreamUrl(file);
     if (!uri) {
       setErrorSheet({
         title: "Can't play",
@@ -226,7 +232,7 @@ export default function TeraboxScreen() {
   const enqueueBackground = async (index: number) => {
     if (!share) return;
     try {
-      const id = await startTeraboxDownload(share.files[index]);
+      const id = await startTeraboxDownload(share.files[index], downloadMode);
       idToIndex.current.set(id, index);
       setBgProgress((prev) => ({
         ...prev,
@@ -266,7 +272,7 @@ export default function TeraboxScreen() {
       try {
         lastPct.current = -1;
         setSavingIndex(index);
-        await saveTeraboxFile(file, progressFor(index));
+        await saveTeraboxFile(file, downloadMode, progressFor(index));
         saved++;
         next.add(index);
       } catch (err) {
@@ -307,7 +313,7 @@ export default function TeraboxScreen() {
     setSavingIndex(index);
     lastPct.current = -1;
     try {
-      await saveTeraboxFile(share.files[index], progressFor(index));
+      await saveTeraboxFile(share.files[index], downloadMode, progressFor(index));
       setSavedIndices((prev) => new Set(prev).add(index));
     } catch (err) {
       console.warn("[terabox] save failed:", err);
@@ -426,6 +432,49 @@ export default function TeraboxScreen() {
                 {fileCount > 1 ? ` · ${fileCount} files` : ""}
               </ThemedText>
             )}
+
+            {/* Download quality: Fast (transcoded HLS, unthrottled) vs Original
+                (full quality, but throttled hard by TeraBox for non-VIP). */}
+            <View className="gap-1.5">
+              <ThemedText type="muted" className="px-1 uppercase">
+                Download quality
+              </ThemedText>
+              <View className="flex-row gap-2 rounded-2xl bg-surface p-1">
+                {(
+                  [
+                    { key: "hls", label: "Fast", sub: "streaming quality" },
+                    { key: "original", label: "Original", sub: "full · slow" },
+                  ] as const
+                ).map((opt) => {
+                  const active = downloadMode === opt.key;
+                  return (
+                    <Pressable
+                      key={opt.key}
+                      onPress={() => setDownloadMode(opt.key)}
+                      disabled={anyDownloading}
+                      style={active ? { backgroundColor: colors.accent } : undefined}
+                      className={`flex-1 items-center rounded-xl py-2 active:opacity-80 ${
+                        anyDownloading ? "opacity-50" : ""
+                      }`}
+                    >
+                      <ThemedText
+                        className={`text-sm font-semibold ${active ? "text-white" : ""}`}
+                        style={active ? undefined : { color: colors.text }}
+                      >
+                        {opt.label}
+                      </ThemedText>
+                      <ThemedText
+                        className="text-xs"
+                        style={{ color: active ? "#ffffffcc" : colors.textSecondary }}
+                      >
+                        {opt.sub}
+                      </ThemedText>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+
             <View className="gap-2">
               {share.files.map((file, i) => {
                 const downloading = isDownloading(i);
