@@ -1,9 +1,10 @@
 import Constants from "expo-constants";
 import { useRouter } from "expo-router";
-import { Pressable, View } from "react-native";
+import { Pressable, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Icon, type IconName } from "@/components/icon";
+import { OpenStats } from "@/components/open-stats";
 import { SortOptionsList } from "@/components/sort-options-list";
 import { ThemedText } from "@/components/themed-text";
 import { useTheme } from "@/hooks/use-theme";
@@ -37,6 +38,10 @@ export default function SettingsScreen() {
         </ThemedText>
       </View>
 
+      <ScrollView
+        contentContainerStyle={{ paddingBottom: 32 }}
+        showsVerticalScrollIndicator={false}
+      >
       <View className="mt-4 px-4">
         <ThemedText type="muted" className="mb-2 px-1 uppercase">
           Appearance
@@ -91,6 +96,14 @@ export default function SettingsScreen() {
           </View>
         </View>
       </View>
+
+      <View className="mt-8 px-4">
+        <ThemedText type="muted" className="mb-2 px-1 uppercase">
+          App opens
+        </ThemedText>
+        <OpenStats />
+      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }

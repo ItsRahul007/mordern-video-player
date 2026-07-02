@@ -18,6 +18,7 @@ import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { useTheme } from '@/hooks/use-theme';
 import { playbackStore } from '@/lib/playback-store';
 import { playerPrefs } from '@/lib/player-prefs';
+import { recordAppOpen } from '@/lib/supabase';
 import { QueryProvider } from '@/providers/query-provider';
 import { SortProvider } from '@/providers/sort-provider';
 import { ThemeProvider } from '@/providers/theme-provider';
@@ -84,6 +85,8 @@ export default function RootLayout() {
     void playbackStore.hydrate();
     void playerPrefs.hydrate();
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    // Log this launch to Supabase for the usage chart (fire-and-forget).
+    void recordAppOpen();
   }, []);
 
   // Open videos launched from another app's "Open with" menu. The intent's

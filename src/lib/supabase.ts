@@ -1,0 +1,66 @@
+/**
+ * Minimal Supabase access via the PostgREST REST API.
+ *
+ * We talk to Supabase directly with `fetch` instead of pulling in
+ * `@supabase/supabase-js` — the only thing this app needs is a single insert
+ * (record an app open) and a single select (read them back for the usage
+ * chart), and the JS client drags in URL/stream polyfills that React Native
+ * doesn't ship. The table has RLS locked down to anon insert/select on the
+ * `open-count` table only, so the publishable key is safe to embed.
+ *
+ * `EXPO_PUBLIC_SUPABASE_URL` already points at the `/rest/v1/` endpoint.
+ */
+
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
+const SUPABASE_KEY = process.env.EXPO_PUBLIC_SUPABASE_KEY;
+
+/** One row of the `open-count` table. */
+export type OpenCount = {
+  id: string | number;
+  created_at: string;
+};
+
+const TABLE = "open-count";
+
+function headers(): Record<string, string> {
+  return {
+    apikey: SUPABASE_KEY ?? "",
+    Authorization: `Bearer ${SUPABASE_KEY ?? ""}`,
+    "Content-Type": "application/json",
+  };
+}
+
+const configured = Boolean(SUPABASE_URL && SUPABASE_KEY);
+
+/**
+ * Record a single app-open event. Fire-and-forget: the row's `id` and
+ * `created_at` are filled in by the database, so we post an empty object.
+ * Never throws — a failed analytics ping must not affect app startup.
+ */
+export async function recordAppOpen(): Promise<void> {
+  if (!configured) return;
+  try {
+    await fetch(`${SUPABASE_URL}${TABLE}`, {
+      method: "POST",
+      headers: { ...headers(), Prefer: "return=minimal" },
+      body: "{}",
+    });
+  } catch {
+    // Offline / server error — silently ignore.
+  }
+}
+
+/** Fetch every recorded app-open, newest first. */
+export async function fetchAppOpens(): Promise<OpenCount[]> {
+  if (!configured) {
+    throw new Error("Supabase is not configured");
+  }
+  const res = await fetch(
+    `${SUPABASE_URL}${TABLE}?select=id,created_at&order=created_at.desc`,
+    { headers: headers() },
+  );
+  if (!res.ok) {
+    throw new Error(`Supabase request failed (${res.status})`);
+  }
+  return (await res.json()) as OpenCount[];
+}
