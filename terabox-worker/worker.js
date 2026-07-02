@@ -25,6 +25,22 @@ const BASE = "https://www.1024terabox.com";
 
 const ALLOWED_DLINK_HOST = /(^|\.)(terabox|1024tera|1024terabox|teraboxapp|terafileshare)\.com$/i;
 
+/**
+ * HLS transcode variants TeraBox exposes via /share/streaming. This is the path
+ * the terabox.app player itself uses — the transcoded stream is served from a
+ * FAST, unthrottled CDN, unlike the original-file dlink which TeraBox rate-caps
+ * to ~20-30 KB/s for non-VIP accounts. 480p works on any account; the 720/1080
+ * variants only resolve for VIP cookies (they fall back to a JSON errno otherwise).
+ */
+const HLS_TYPES = {
+  "480": "M3U8_FLV_264_480",
+  "720": "M3U8_AUTO_720",
+  "1080": "M3U8_FLV_264_1080",
+};
+
+/** Referer the transcode CDN accepts for the manifest + segment fetches. */
+const HLS_REFERER = "https://www.terabox.com/";
+
 export default {
   async fetch(request, env, ctx) {
     const cors = {
@@ -61,9 +77,15 @@ export default {
 
     const surl = url.searchParams.get("surl");
     const dlinkParam = url.searchParams.get("url");
+    const segParam = url.searchParams.get("seg");
     const range = request.headers.get("Range");
 
     try {
+      // A transcode-CDN segment, routed back through the Worker so it carries the
+      // Referer/cookie (the rewritten HLS manifest points every segment here).
+      if (segParam) {
+        return proxySegment(segParam, env.TERABOX_COOKIE, cors, range);
+      }
       if (surl) {
         const id = surl.replace(/^1/, "");
         if (url.searchParams.get("list")) {
@@ -71,7 +93,20 @@ export default {
           if (!r.ok) return json(r, 200, cors);
           return json({ errno: 0, list: r.info.list }, 200, cors);
         }
-        // Stream (download or watch): resolve a dlink (cached) and stream it.
+        // HLS path (fast transcoded stream — used for watch AND fast download).
+        if (url.searchParams.get("hls")) {
+          return handleHls(
+            env,
+            id,
+            url.searchParams.get("fs_id"),
+            url.searchParams.get("quality") || "480",
+            !!url.searchParams.get("download"),
+            url,
+            cors,
+          );
+        }
+        // Original file (download or watch): resolve a dlink (cached), stream it.
+        // Full quality, but TeraBox throttles it hard for non-VIP accounts.
         const d = await getDlink(env, id, url.searchParams.get("fs_id"), ctx);
         if (!d.ok) return json(d, 200, cors);
         return streamFile(d.dlink, env.TERABOX_COOKIE, d.filename, cors, range);
@@ -105,7 +140,130 @@ async function resolveShare(env, surl) {
     return { ok: false, stage: "shorturlinfo", errno: info.errno, errmsg: info.errmsg };
   }
   const files = (info.list || []).filter((f) => String(f.isdir) !== "1");
-  return { ok: true, origin, qp, apiH, info, files };
+  return { ok: true, origin, qp, apiH, info, files, jsToken };
+}
+
+/**
+ * Resolve and return the transcoded HLS stream for a file. For `download`, the
+ * segments are concatenated server-side into one MPEG-TS file and streamed as an
+ * attachment. Otherwise the M3U8 manifest is returned with every segment URL
+ * rewritten to route back through this Worker (`?seg=`), so the player needs no
+ * special headers — the Worker applies the Referer/cookie to each segment.
+ */
+async function handleHls(env, surl, fsIdWanted, quality, download, reqUrl, cors) {
+  const r = await resolveShare(env, surl);
+  if (!r.ok) return json(r, 200, cors);
+  const file = fsIdWanted
+    ? r.files.find((f) => String(f.fs_id) === String(fsIdWanted))
+    : r.files[0];
+  if (!file) {
+    return json({ ok: false, stage: "pick", error: "file not found", fsIdWanted }, 200, cors);
+  }
+
+  const type = HLS_TYPES[quality] || HLS_TYPES["480"];
+  const streamUrl =
+    `${r.origin}/share/streaming?uk=${r.info.uk}&shareid=${r.info.shareid}` +
+    `&type=${type}&fid=${file.fs_id}&sign=${encodeURIComponent(r.info.sign)}` +
+    `&timestamp=${r.info.timestamp}&jsToken=${encodeURIComponent(r.jsToken)}` +
+    `&isplayer=1&esl=1&ehps=1&clienttype=0&app_id=250528&web=1&channel=dubox`;
+
+  const res = await fetch(streamUrl, { headers: { ...r.apiH, Referer: HLS_REFERER } });
+  const text = await res.text();
+  if (!text.trim().startsWith("#EXTM3U")) {
+    // Not a manifest — usually a JSON errno (e.g. quality needs VIP, or expired).
+    console.log("HLS FAILED", JSON.stringify({ status: res.status, type, body: text.slice(0, 300) }));
+    return json({ stage: "streaming", type, status: res.status, body: text.slice(0, 400) }, 200, cors);
+  }
+
+  // Segment URIs in the manifest are absolute (a different CDN host); resolve any
+  // relative ones against the manifest URL just in case.
+  const segUrls = () =>
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+      .map((l) => (/^https?:\/\//.test(l) ? l : new URL(l, streamUrl).toString()));
+
+  if (download) {
+    return downloadHlsConcat(segUrls(), env.TERABOX_COOKIE, file.server_filename, cors);
+  }
+
+  const origin = reqUrl.origin;
+  const token = reqUrl.searchParams.get("token");
+  const tokenQ = token ? `&token=${encodeURIComponent(token)}` : "";
+  const rewritten = text
+    .split("\n")
+    .map((line) => {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) return line;
+      const abs = /^https?:\/\//.test(t) ? t : new URL(t, streamUrl).toString();
+      return `${origin}/hls/seg.ts?seg=${encodeURIComponent(abs)}${tokenQ}`;
+    })
+    .join("\n");
+
+  const out = new Headers({ "Content-Type": "application/x-mpegURL" });
+  for (const [k, v] of Object.entries(cors)) out.set(k, v);
+  return new Response(rewritten, { headers: out });
+}
+
+/** Fetch one transcode-CDN segment with the Referer/cookie and stream it back. */
+async function proxySegment(segUrl, cookie, cors, range) {
+  try {
+    new URL(segUrl);
+  } catch {
+    return json({ error: "invalid seg url" }, 400, cors);
+  }
+  const headers = {
+    "User-Agent": USER_AGENT,
+    Referer: HLS_REFERER,
+    Cookie: cookie,
+    Accept: "*/*",
+  };
+  if (range) headers.Range = range;
+
+  const upstream = await fetch(segUrl, { headers, redirect: "follow" });
+  const out = new Headers();
+  for (const k of ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"]) {
+    const v = upstream.headers.get(k);
+    if (v) out.set(k, v);
+  }
+  for (const [k, v] of Object.entries(cors)) out.set(k, v);
+  return new Response(upstream.body, { status: upstream.status, headers: out });
+}
+
+/**
+ * Stream the HLS segments back-to-back as a single MPEG-TS download. Segments are
+ * fetched one at a time and enqueued as they arrive, so memory stays flat even for
+ * a large video (no whole-file buffering). Concatenated TS plays in expo-video and
+ * most players; it isn't a re-muxed MP4 (no ffmpeg in a Worker).
+ */
+function downloadHlsConcat(segUrls, cookie, filename, cors) {
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        for (const s of segUrls) {
+          const up = await fetch(s, {
+            headers: { "User-Agent": USER_AGENT, Referer: HLS_REFERER, Cookie: cookie, Accept: "*/*" },
+            redirect: "follow",
+          });
+          if (!up.ok) throw new Error(`segment ${up.status}`);
+          controller.enqueue(new Uint8Array(await up.arrayBuffer()));
+        }
+        controller.close();
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+  });
+
+  const base = (filename || "video").replace(/\.[^.]+$/, "");
+  const name = `${base}.ts`.replace(/"/g, "");
+  const out = new Headers({
+    "Content-Type": "video/mp2t",
+    "Content-Disposition": `attachment; filename="${name}"`,
+  });
+  for (const [k, v] of Object.entries(cors)) out.set(k, v);
+  return new Response(stream, { headers: out });
 }
 
 /**
