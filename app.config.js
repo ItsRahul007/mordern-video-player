@@ -8,12 +8,20 @@ module.exports = {
     slug: "video-player",
     version,
     orientation: "default",
-    // OTA updates via EAS Update. The fingerprint policy ties each update to
-    // the native build's fingerprint, so JS-only changes ship over-the-air
-    // while native changes (new modules, plugins, permissions) require a fresh
-    // build that bumps the runtime version automatically.
+    // OTA updates via EAS Update. Runtime version is tied to the app version:
+    // JS-only changes ship over-the-air within the same version, while native
+    // changes (new modules, plugins, permissions) require bumping `version`
+    // below so the update targets only compatible binaries.
+    //
+    // NOTE: We intentionally do NOT use the "fingerprint" policy. @expo/fingerprint
+    // (0.19.x) factors file mtimes into its native-module directory hashes, so
+    // every `npm ci` yields a different fingerprint. eas-cli computes the runtime
+    // version from the local install while the build container recomputes it from
+    // its own fresh `npm ci`, so the two never matched and `eas build --local`
+    // aborted with "Runtime version calculated on local machine not equal to
+    // runtime version calculated during build."
     runtimeVersion: {
-      policy: "fingerprint",
+      policy: "appVersion",
     },
     updates: {
       url: "https://u.expo.dev/bdc45493-6f5f-403c-9212-16ecbbe1c9eb",
