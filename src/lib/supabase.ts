@@ -17,6 +17,9 @@ const SUPABASE_KEY = process.env.EXPO_PUBLIC_SUPABASE_KEY;
 /** One row of the `open-count` table. */
 export type OpenCount = {
   id: string | number;
+  /** Client-supplied true open time. Null for legacy rows recorded before this column existed. */
+  opened_at: string | null;
+  /** Server insert time — kept as a fallback for legacy rows without `opened_at`. */
   created_at: string;
 };
 
@@ -32,22 +35,26 @@ function headers(): Record<string, string> {
 
 const configured = Boolean(SUPABASE_URL && SUPABASE_KEY);
 
+/** A queued app-open ready to upload. */
+export type AppOpenInsert = {
+  opened_at: string;
+  device_id: string;
+};
+
 /**
- * Record a single app-open event. Fire-and-forget: the row's `id` and
- * `created_at` are filled in by the database, so we post an empty object.
- * Never throws — a failed analytics ping must not affect app startup.
+ * Batch-insert app-open events. PostgREST accepts a JSON array body, so the
+ * whole local queue uploads in one request. Returns whether the server accepted
+ * the rows; throws only on a network error so the caller can keep the queue and
+ * retry later. No-ops (returns true) when Supabase isn't configured.
  */
-export async function recordAppOpen(): Promise<void> {
-  if (!configured) return;
-  try {
-    await fetch(`${SUPABASE_URL}${TABLE}`, {
-      method: "POST",
-      headers: { ...headers(), Prefer: "return=minimal" },
-      body: "{}",
-    });
-  } catch {
-    // Offline / server error — silently ignore.
-  }
+export async function insertAppOpens(rows: AppOpenInsert[]): Promise<boolean> {
+  if (!configured || rows.length === 0) return true;
+  const res = await fetch(`${SUPABASE_URL}${TABLE}`, {
+    method: "POST",
+    headers: { ...headers(), Prefer: "return=minimal" },
+    body: JSON.stringify(rows),
+  });
+  return res.ok;
 }
 
 /** Fetch every recorded app-open, newest first. */
@@ -56,7 +63,7 @@ export async function fetchAppOpens(): Promise<OpenCount[]> {
     throw new Error("Supabase is not configured");
   }
   const res = await fetch(
-    `${SUPABASE_URL}${TABLE}?select=id,created_at&order=created_at.desc`,
+    `${SUPABASE_URL}${TABLE}?select=id,opened_at,created_at&order=opened_at.desc.nullslast`,
     { headers: headers() },
   );
   if (!res.ok) {
