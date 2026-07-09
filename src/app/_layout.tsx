@@ -10,15 +10,17 @@ import {
 } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { StatusBar } from 'expo-status-bar';
+import NetInfo from '@react-native-community/netinfo';
 import { useEffect } from 'react';
+import { AppState } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useShareIntent } from 'expo-share-intent';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { useTheme } from '@/hooks/use-theme';
+import { flushPendingOpens, recordAppOpen } from '@/lib/open-tracker';
 import { playbackStore } from '@/lib/playback-store';
 import { playerPrefs } from '@/lib/player-prefs';
-import { recordAppOpen } from '@/lib/supabase';
 import { QueryProvider } from '@/providers/query-provider';
 import { SortProvider } from '@/providers/sort-provider';
 import { ThemeProvider } from '@/providers/theme-provider';
@@ -85,8 +87,26 @@ export default function RootLayout() {
     void playbackStore.hydrate();
     void playerPrefs.hydrate();
     void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-    // Log this launch to Supabase for the usage chart (fire-and-forget).
+    // Log this launch for the usage chart: queued locally (offline-safe) then
+    // flushed to Supabase. Retry the queue whenever we return to the foreground
+    // so an open recorded offline uploads as soon as the network is back.
     void recordAppOpen();
+    const appStateSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void flushPendingOpens();
+    });
+    // Also flush the moment connectivity returns mid-session (e.g. the app was
+    // opened offline and the network came back while it stayed in foreground).
+    // Only act on the offline -> online transition to avoid redundant work.
+    let online = true;
+    const netInfoSub = NetInfo.addEventListener((state) => {
+      const nowOnline = Boolean(state.isConnected && state.isInternetReachable);
+      if (nowOnline && !online) void flushPendingOpens();
+      online = nowOnline;
+    });
+    return () => {
+      appStateSub.remove();
+      netInfoSub();
+    };
   }, []);
 
   // Open videos launched from another app's "Open with" menu. The intent's

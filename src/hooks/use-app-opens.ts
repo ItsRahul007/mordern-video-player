@@ -25,7 +25,9 @@ export function groupByDay(rows: OpenCount[]): DailyOpens[] {
   const buckets = new Map<string, DailyOpens>();
 
   for (const row of rows) {
-    const when = new Date(row.created_at);
+    // Prefer the true open time; fall back to the server insert time for
+    // legacy rows recorded before `opened_at` existed.
+    const when = new Date(row.opened_at ?? row.created_at);
     if (Number.isNaN(when.getTime())) continue;
 
     const key = localDateKey(when);
