@@ -490,6 +490,137 @@ async function fetchHlsManifest(
   return text;
 }
 
+/**
+ * Fetch the transcoded stream and expand TeraBox's short preview window into a
+ * manifest covering the whole file (see {@link expandTranscodedManifest}). Falls
+ * back to the preview as-is if it isn't the expected byte-range form.
+ */
+async function fetchFullStream(
+  file: TeraboxFile,
+  quality: TeraboxQuality,
+): Promise<FullManifest> {
+  const sample = await fetchHlsManifest(file, quality);
+  const base = streamingUrl(file, quality);
+  const full = expandTranscodedManifest(sample, base);
+  logManifestDiagnostics(sample, full, quality);
+  return full ?? { manifest: sample, segments: hlsSegmentUrls(sample, base) };
+}
+
+/** Read a numeric query param off a URL string (0 if absent/unparseable). */
+function numParam(url: string, name: string): number {
+  return Number(new RegExp(`[?&]${name}=(\\d+)`).exec(url)?.[1] ?? 0);
+}
+
+/** Replace an existing query param's value in a URL string (no-op if absent). */
+function setParam(url: string, name: string, value: string | number): string {
+  return url.replace(new RegExp(`([?&]${name}=)[^&]*`), `$1${value}`);
+}
+
+/**
+ * A full manifest reconstructed from TeraBox's short preview window.
+ *
+ * TeraBox's `/share/streaming` returns only a few segments (~20-30s) that are
+ * byte-range slices of the transcoded `.ts` (`ts_size` = its full length),
+ * marked `#EXT-X-ENDLIST` so a player stops there. But every segment shares one
+ * `sign`/`xcode` that authorizes the whole object — only `range`/`len` change —
+ * so we can page contiguous byte windows over the entire `0…ts_size` range and
+ * rebuild the complete stream. Segment durations are extrapolated from the
+ * sample window's bytes-per-second ratio (used for the seek bar; playback of the
+ * full stream doesn't depend on their accuracy).
+ */
+type FullManifest = { manifest: string; segments: string[] };
+
+/** Roughly how many seconds of video each rebuilt segment should span. */
+const SEGMENT_TARGET_SECONDS = 10;
+
+/**
+ * Expand a windowed preview manifest into one covering the whole transcoded
+ * file. Returns `null` if the manifest isn't the expected byte-range form (no
+ * `ts_size`/`range` on the segments), so the caller can fall back to the raw
+ * preview segments.
+ */
+function expandTranscodedManifest(
+  sample: string,
+  baseUrl: string,
+): FullManifest | null {
+  const sampleSegments = hlsSegmentUrls(sample, baseUrl);
+  const template = sampleSegments[0];
+  if (!template) return null;
+
+  const tsSize = numParam(template, "ts_size");
+  // The byte-range slicing markers must be present to page the file safely.
+  if (!tsSize || !/[?&]range=/.test(template) || !/[?&]len=/.test(template)) {
+    return null;
+  }
+
+  // Bytes-per-second from the preview window: Σ segment length ÷ Σ EXTINF.
+  const durations = [...sample.matchAll(/#EXTINF:([\d.]+)/g)].map((m) =>
+    Number(m[1] || 0),
+  );
+  const totalLen = sampleSegments.reduce((s, u) => s + numParam(u, "len"), 0);
+  const totalDur = durations.reduce((s, d) => s + d, 0);
+  const bytesPerSecond = totalDur > 0 && totalLen > 0 ? totalLen / totalDur : 0;
+
+  // Window size ≈ SEGMENT_TARGET_SECONDS, aligned down to the 188-byte MPEG-TS
+  // packet size so segment boundaries land on packet edges.
+  const rawWindow = bytesPerSecond
+    ? Math.round(bytesPerSecond * SEGMENT_TARGET_SECONDS)
+    : 1_000_000;
+  const windowBytes = Math.max(188, Math.floor(rawWindow / 188) * 188);
+
+  const segments: string[] = [];
+  const lines = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    `#EXT-X-TARGETDURATION:${Math.ceil(SEGMENT_TARGET_SECONDS)}`,
+    "#EXT-X-MEDIA-SEQUENCE:0",
+  ];
+  for (let start = 0; start < tsSize; start += windowBytes) {
+    const end = Math.min(start + windowBytes, tsSize) - 1;
+    const bytes = end - start + 1;
+    const dur = bytesPerSecond ? bytes / bytesPerSecond : SEGMENT_TARGET_SECONDS;
+    let url = setParam(template, "range", `${start}-${end}`);
+    url = setParam(url, "len", bytes);
+    url = setParam(url, "dtime", Math.max(1, Math.round(dur)));
+    segments.push(url);
+    lines.push(`#EXTINF:${dur.toFixed(3)},`, url);
+  }
+  lines.push("#EXT-X-ENDLIST");
+  return { manifest: lines.join("\n"), segments };
+}
+
+/**
+ * Log a one-line summary of the preview manifest and the rebuilt full manifest,
+ * so a short/truncated stream is easy to spot in device logs.
+ */
+function logManifestDiagnostics(
+  manifest: string,
+  full: FullManifest | null,
+  quality: TeraboxQuality,
+): void {
+  const previewSegs = hlsSegmentUrls(manifest, "").length;
+  const previewSecs = [...manifest.matchAll(/#EXTINF:([\d.]+)/g)].reduce(
+    (s, m) => s + Number(m[1] || 0),
+    0,
+  );
+  if (full) {
+    const fullSecs = [...full.manifest.matchAll(/#EXTINF:([\d.]+)/g)].reduce(
+      (s, m) => s + Number(m[1] || 0),
+      0,
+    );
+    console.log(
+      `[terabox] manifest q=${quality}: preview ${previewSegs} seg / ` +
+        `${previewSecs.toFixed(1)}s → rebuilt ${full.segments.length} seg / ` +
+        `${fullSecs.toFixed(1)}s`,
+    );
+  } else {
+    console.log(
+      `[terabox] manifest q=${quality}: preview ${previewSegs} seg / ` +
+        `${previewSecs.toFixed(1)}s (not a byte-range manifest, using as-is)`,
+    );
+  }
+}
+
 /** The absolute segment URLs from an HLS media playlist, in order. */
 function hlsSegmentUrls(manifest: string, baseUrl: string): string[] {
   return manifest
@@ -518,7 +649,7 @@ export async function prepareTeraboxWatchUri(
   quality: TeraboxQuality = "480",
 ): Promise<string> {
   try {
-    const manifest = await fetchHlsManifest(file, quality);
+    const { manifest } = await fetchFullStream(file, quality);
     const local = new File(cacheDir(), `play_${file.fsId}_${quality}.m3u8`);
     if (local.exists) local.delete();
     local.write(manifest);
@@ -661,8 +792,7 @@ async function downloadHlsToFile(
   dest: File,
   onProgress?: (written: number, total: number) => void,
 ): Promise<void> {
-  const manifest = await fetchHlsManifest(file, quality);
-  const segments = hlsSegmentUrls(manifest, streamingUrl(file, quality));
+  const { segments } = await fetchFullStream(file, quality);
   if (segments.length === 0) {
     throw new TeraboxError("This stream has no segments to download.");
   }
