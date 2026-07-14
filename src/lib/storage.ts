@@ -15,4 +15,5 @@ export const StorageKeys = {
   playerBrightness: 'player-brightness',
   playerAudioLanguage: 'player-audio-language',
   deviceId: 'device-id',
+  teraboxCookie: 'terabox-cookie',
 } as const;

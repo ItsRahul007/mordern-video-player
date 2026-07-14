@@ -13,6 +13,15 @@
  * play them (via a local .m3u8) and download them (concatenated into one .ts)
  * entirely on-device. No proxy, no TeraBox login, no WebView.
  *
+ * Anonymous `/share/streaming` only transcodes a ~4-min window of longer videos.
+ * To get the FULL length, the on-device resolve + streaming run LOGGED-IN from the
+ * phone's residential IP (which returns the full-length transcode; the datacenter
+ * Worker can't — its IP is blocked at the streaming endpoint). The login cookie is
+ * fetched at RUNTIME from the Worker's token-gated `?cookie=1` endpoint (so a
+ * rotated cookie needs only a `wrangler secret put`, no app rebuild), cached in
+ * SQLite as a backup, and falls back to `EXPO_PUBLIC_TERABOX_COOKIE`. See
+ * {@link ensureTeraboxCookie}.
+ *
  * The full-quality "original" file still sits behind a logged-in httpOnly cookie
  * wall (its signed dlink 403s without the account session), so that mode is
  * best-effort via the optional proxy Worker; HLS is the reliable path.
@@ -33,6 +42,8 @@ import {
   isBackgroundDownloadAvailable,
   startBackgroundDownload,
 } from "@modules/media-downloader";
+
+import { Storage, StorageKeys } from "@/lib/storage";
 
 /** Public folder, at the storage root, that downloads are saved into (Android). */
 export const SAVE_DIR = "/storage/emulated/0/Mordern Video Player/TeraBox";
@@ -81,6 +92,115 @@ export type TeraboxDownloadMode = "hls" | "original";
 const TERABOX_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/**
+ * Optional full cookie header for a logged-in TeraBox account (same value as the
+ * Worker's `TERABOX_COOKIE`: `lang=…; ndus=…; ndut_fmt=…; csrfToken=…; browserid=…`).
+ * When set, the on-device resolve and `/share/streaming` run LOGGED-IN from the
+ * phone's residential IP — which returns the FULL-LENGTH transcode instead of the
+ * ~4-minute anonymous preview. (The datacenter Worker can't do this: its
+ * server IP is blocked at the streaming endpoint. The device isn't.) The cookie
+ * expires periodically — refresh it the same way you refresh the Worker's.
+ */
+/** Optional env fallback for the cookie (last resort; usually empty). */
+const TERABOX_COOKIE_ENV = process.env.EXPO_PUBLIC_TERABOX_COOKIE ?? "";
+
+/**
+ * The active logged-in cookie for on-device requests, resolved at RUNTIME so a
+ * rotated cookie doesn't need an app rebuild. Populated by
+ * {@link ensureTeraboxCookie} in priority order: Worker → SQLite cache → env.
+ * Starts at the env value so anonymous/offline still has a sane default.
+ */
+let activeCookie = TERABOX_COOKIE_ENV;
+/** Whether the runtime cookie load has been attempted this session. */
+let cookieLoaded = false;
+
+/** Whether an on-device logged-in session is available. */
+export function isTeraboxLoggedIn(): boolean {
+  return !!activeCookie;
+}
+
+/** The cookie's names (no values) for logs. */
+function cookieNamesOf(cookie: string): string {
+  return cookie
+    .split(";")
+    .map((p) => p.trim().split("=")[0])
+    .filter(Boolean)
+    .join(",");
+}
+
+/**
+ * Load the logged-in cookie used for on-device requests. Fetches it from the
+ * Worker (the fresh source of truth — so a rotated cookie is picked up on the
+ * next launch with NO app rebuild), caches it to SQLite as a backup for when the
+ * Worker is unreachable, and falls back to the env var. Runs once per session
+ * (pass `force` to re-fetch, e.g. after an auth failure). Safe to call anywhere
+ * before a resolve/stream; the result feeds {@link teraboxHeaders}.
+ */
+export async function ensureTeraboxCookie(force = false): Promise<void> {
+  if (cookieLoaded && !force) return;
+  cookieLoaded = true;
+
+  // 1. Worker — needs the proxy URL + token (the cookie endpoint is token-gated).
+  if (TERABOX_PROXY_URL && TERABOX_PROXY_TOKEN) {
+    try {
+      const base = TERABOX_PROXY_URL.replace(/\/$/, "");
+      const res = await fetch(
+        `${base}/?cookie=1&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`,
+      );
+      const json = (await res.json()) as { cookie?: string };
+      if (json.cookie) {
+        activeCookie = json.cookie;
+        try {
+          await Storage.setItem(StorageKeys.teraboxCookie, json.cookie);
+        } catch {
+          // caching is best-effort
+        }
+        console.log(
+          `[terabox] cookie: from worker (names=[${cookieNamesOf(json.cookie)}])`,
+        );
+        return;
+      }
+      console.warn("[terabox] cookie: worker returned no cookie");
+    } catch (err) {
+      console.warn("[terabox] cookie: worker fetch failed:", String(err));
+    }
+  }
+
+  // 2. SQLite cache — backup when the Worker is down/unreachable.
+  try {
+    const cached = await Storage.getItem(StorageKeys.teraboxCookie);
+    if (cached) {
+      activeCookie = cached;
+      console.log(
+        `[terabox] cookie: from cache (names=[${cookieNamesOf(cached)}])`,
+      );
+      return;
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. Env fallback (already the initial value).
+  console.log(
+    `[terabox] cookie: ${activeCookie ? `env fallback (names=[${cookieNamesOf(activeCookie)}])` : "none (anonymous)"}`,
+  );
+}
+
+/** Standard headers for on-device TeraBox requests, incl. the login cookie if set. */
+function teraboxHeaders(extra?: Record<string, string>): Record<string, string> {
+  return {
+    "User-Agent": TERABOX_USER_AGENT,
+    ...(activeCookie ? { Cookie: activeCookie } : {}),
+    ...extra,
+  };
+}
+
+/** Cookie summary for logs — names + length only, never the secret values. */
+function cookieDiag(): string {
+  if (!activeCookie) return "none (anonymous)";
+  return `len=${activeCookie.length} names=[${cookieNamesOf(activeCookie)}]`;
+}
 
 /**
  * The many mirror hosts TeraBox serves the same content under. A pasted link may
@@ -277,13 +397,16 @@ function errnoMessage(errno: number | undefined): string {
  * Throws {@link TeraboxError} with a user-facing message on any failure.
  */
 async function resolveShareOnDevice(surl: string): Promise<TeraboxShare> {
-  const ua = { "User-Agent": TERABOX_USER_AGENT };
+  await ensureTeraboxCookie();
   const pageUrl = `${H5_ORIGIN}/sharing/link?surl=${encodeURIComponent(surl)}`;
+  console.log(
+    `[terabox] resolve start: surl=${surl} loggedIn=${isTeraboxLoggedIn()} cookie=${cookieDiag()}`,
+  );
 
   let pageRes: Response;
   let html: string;
   try {
-    pageRes = await fetch(pageUrl, { headers: ua });
+    pageRes = await fetch(pageUrl, { headers: teraboxHeaders() });
     html = await pageRes.text();
   } catch (err) {
     console.warn("[terabox] page fetch failed:", String(err));
@@ -298,6 +421,10 @@ async function resolveShareOnDevice(surl: string): Promise<TeraboxShare> {
   }
 
   const jsToken = extractJsToken(html);
+  console.log(
+    `[terabox] page: status=${pageRes.status} finalUrl=${pageRes.url} ` +
+      `htmlLen=${html.length} jsToken=${jsToken ? `found(${jsToken.length})` : "NONE"}`,
+  );
   if (!jsToken) {
     console.warn(
       `[terabox] no jsToken (status=${pageRes.status}, htmlLen=${html.length}, finalUrl=${pageRes.url})`,
@@ -309,7 +436,7 @@ async function resolveShareOnDevice(surl: string): Promise<TeraboxShare> {
 
   const qs =
     `${API_BASE_QS}&jsToken=${encodeURIComponent(jsToken)}&dp-logid=`;
-  const apiHeaders = { ...ua, Referer: pageUrl };
+  const apiHeaders = teraboxHeaders({ Referer: pageUrl });
 
   let info: ShortUrlInfo;
   try {
@@ -323,6 +450,10 @@ async function resolveShareOnDevice(surl: string): Promise<TeraboxShare> {
     throw new TeraboxError("Couldn't read this share right now. Please try again.");
   }
 
+  console.log(
+    `[terabox] shorturlinfo: errno=${info.errno} shareid=${info.shareid ?? "?"} ` +
+      `uk=${info.uk ?? "?"} sign=${info.sign ? "yes" : "no"} listLen=${info.list?.length ?? 0}`,
+  );
   if (info.errno !== 0 || !info.shareid || !info.sign) {
     console.warn(
       `[terabox] shorturlinfo errno=${info.errno} errmsg=${info.errmsg ?? ""}`,
@@ -446,9 +577,8 @@ export async function fetchShareInfo(surl: string): Promise<TeraboxShare> {
   return resolveShareOnDevice(surl);
 }
 
-/** Build the authenticated `/share/streaming` HLS manifest URL for a file. */
-function streamingUrl(file: TeraboxFile, quality: TeraboxQuality): string {
-  const type = HLS_TYPES[quality] ?? HLS_TYPES["480"];
+/** Build the `/share/streaming` HLS manifest URL for a raw transcode `type`. */
+function streamingUrlForType(file: TeraboxFile, type: string): string {
   return (
     `${file.origin}/share/streaming?uk=${encodeURIComponent(file.uk)}` +
     `&shareid=${encodeURIComponent(file.shareid)}&type=${type}` +
@@ -459,28 +589,95 @@ function streamingUrl(file: TeraboxFile, quality: TeraboxQuality): string {
   );
 }
 
+/** Build the authenticated `/share/streaming` HLS manifest URL for a file. */
+function streamingUrl(file: TeraboxFile, quality: TeraboxQuality): string {
+  return streamingUrlForType(file, HLS_TYPES[quality] ?? HLS_TYPES["480"]);
+}
+
 /**
- * Fetch the transcoded HLS manifest text for a file. The `/share/streaming`
- * endpoint needs the session cookies + jsToken (both held on-device); a
- * non-manifest body means the quality isn't available (720/1080 need VIP) or the
- * signature expired. Throws {@link TeraboxError} in that case.
+ * Fetch the transcoded HLS manifest via the proxy Worker in its LOGGED-IN
+ * session — which returns the FULL-LENGTH transcode, not the ~4-min anonymous
+ * preview the device gets. Returns `null` (so the caller falls back to the
+ * on-device anonymous fetch) if the proxy isn't configured, errors, or the
+ * cookie is expired. The manifest's segments are open-CDN URLs the device
+ * fetches directly, so only the manifest needs the login.
+ */
+async function fetchHlsManifestViaProxy(
+  file: TeraboxFile,
+  quality: TeraboxQuality,
+): Promise<string | null> {
+  if (!TERABOX_PROXY_URL) return null;
+  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
+  const url =
+    `${base}/?hls=1&quality=${encodeURIComponent(quality)}` +
+    `&${originalContextQs(file)}${proxyTokenQs()}`;
+  try {
+    const res = await fetch(url);
+    const text = await res.text();
+    if (text.trim().startsWith("#EXTM3U")) {
+      console.log("[terabox] HLS manifest via proxy (logged-in, full length)");
+      return text;
+    }
+    console.warn("[terabox] proxy HLS not a manifest:", snippet(text, 160));
+    return null;
+  } catch (err) {
+    console.warn("[terabox] proxy HLS fetch failed:", String(err));
+    return null;
+  }
+}
+
+/**
+ * Fetch the transcoded HLS manifest text for a file. Prefers the logged-in proxy
+ * Worker (full-length transcode); falls back to the on-device anonymous
+ * `/share/streaming` (capped to a ~4-min preview) when the proxy is unavailable.
+ * A non-manifest body means the quality isn't available (720/1080 need VIP) or
+ * the signature expired. Throws {@link TeraboxError} in that case.
  */
 async function fetchHlsManifest(
   file: TeraboxFile,
   quality: TeraboxQuality,
 ): Promise<string> {
+  // With an on-device cookie (Option B) the streaming call is already logged-in
+  // from a residential IP — full length, and better than the datacenter Worker
+  // (which the streaming endpoint blocks). Only fall back to the Worker when no
+  // on-device cookie is configured.
+  const path = activeCookie ? "on-device logged-in" : "on-device anonymous";
+  console.log(`[terabox] hls fetch: q=${quality} path=${path}`);
+  if (!activeCookie) {
+    const viaProxy = await fetchHlsManifestViaProxy(file, quality);
+    if (viaProxy) return viaProxy;
+  }
+
+  let res: Response;
   let text: string;
   try {
-    const res = await fetch(streamingUrl(file, quality), {
-      headers: { "User-Agent": TERABOX_USER_AGENT, Referer: `${file.origin}/` },
+    res = await fetch(streamingUrl(file, quality), {
+      headers: teraboxHeaders({ Referer: `${file.origin}/` }),
     });
     text = await res.text();
   } catch (err) {
     console.warn("[terabox] streaming fetch failed:", String(err));
     throw new TeraboxError("Couldn't reach TeraBox. Check your connection.");
   }
-  if (!text.trim().startsWith("#EXTM3U")) {
-    console.warn(`[terabox] streaming q=${quality} not a manifest:`, snippet(text));
+  const isManifest = text.trim().startsWith("#EXTM3U");
+  console.log(
+    `[terabox] streaming: status=${res.status} len=${text.length} ` +
+      `isManifest=${isManifest} ts_size=${isManifest ? manifestTsSize(text) : 0}`,
+  );
+  if (!isManifest) {
+    // Surface the API errno so a cap/verify/VIP rejection is obvious.
+    let errno: unknown;
+    let errmsg: unknown;
+    try {
+      const j = JSON.parse(text);
+      errno = j.errno;
+      errmsg = j.errmsg;
+    } catch {
+      // not JSON
+    }
+    console.warn(
+      `[terabox] streaming q=${quality} not a manifest: errno=${errno} errmsg=${errmsg} body=${snippet(text)}`,
+    );
     throw new TeraboxError(
       quality === "480"
         ? "Couldn't get a playable stream for this file."
@@ -490,16 +687,51 @@ async function fetchHlsManifest(
   return text;
 }
 
+/** The `ts_size` (full transcode size) advertised by a manifest's segments. */
+function manifestTsSize(manifest: string): number {
+  return Number(/[?&]ts_size=(\d+)/.exec(manifest)?.[1] ?? 0);
+}
+
+/**
+ * How many times to sample `/share/streaming` before committing. TeraBox hands
+ * back transcode objects of *varying* size for the same video across calls
+ * (observed 6.3 MB vs 8.4 MB); sampling a few and keeping the largest avoids
+ * paging a needlessly short one.
+ */
+const STREAM_SAMPLE_ATTEMPTS = 4;
+
 /**
  * Fetch the transcoded stream and expand TeraBox's short preview window into a
- * manifest covering the whole file (see {@link expandTranscodedManifest}). Falls
- * back to the preview as-is if it isn't the expected byte-range form.
+ * manifest covering the whole object (see {@link expandTranscodedManifest}).
+ * Samples the endpoint a few times and keeps the largest object, since each call
+ * can return a different-sized transcode. Falls back to the preview as-is if it
+ * isn't the expected byte-range form.
  */
 async function fetchFullStream(
   file: TeraboxFile,
   quality: TeraboxQuality,
 ): Promise<FullManifest> {
-  const sample = await fetchHlsManifest(file, quality);
+  // A logged-in session (on-device cookie, or the proxy) returns a consistent,
+  // full-length manifest, so one fetch is enough. Anonymous on-device fetches
+  // vary in size per call, so sample a few and keep the largest.
+  await ensureTeraboxCookie();
+  const attempts =
+    isTeraboxLoggedIn() || TERABOX_PROXY_URL ? 1 : STREAM_SAMPLE_ATTEMPTS;
+  console.log(
+    `[terabox] fetchFullStream: q=${quality} attempts=${attempts} loggedIn=${isTeraboxLoggedIn()}`,
+  );
+  let sample = "";
+  let bestTs = -1;
+  for (let i = 0; i < attempts; i++) {
+    const candidate = await fetchHlsManifest(file, quality);
+    const ts = manifestTsSize(candidate);
+    if (ts > bestTs) {
+      bestTs = ts;
+      sample = candidate;
+    }
+  }
+  console.log(`[terabox] picked largest object: ts_size=${bestTs}`);
+
   const base = streamingUrl(file, quality);
   const full = expandTranscodedManifest(sample, base);
   logManifestDiagnostics(sample, full, quality);
@@ -567,6 +799,12 @@ function expandTranscodedManifest(
     ? Math.round(bytesPerSecond * SEGMENT_TARGET_SECONDS)
     : 1_000_000;
   const windowBytes = Math.max(188, Math.floor(rawWindow / 188) * 188);
+
+  const previewRange = /[?&]range=([\d-]+)/.exec(template)?.[1] ?? "?";
+  console.log(
+    `[terabox] expand: ts_size=${tsSize} bytes/s=${bytesPerSecond.toFixed(0)} ` +
+      `window=${windowBytes} previewRange=${previewRange} previewLen=${totalLen}`,
+  );
 
   const segments: string[] = [];
   const lines = [
@@ -660,6 +898,30 @@ export async function prepareTeraboxWatchUri(
   }
 }
 
+/** `&token=` query fragment for the proxy Worker, if a token is configured. */
+function proxyTokenQs(): string {
+  return TERABOX_PROXY_TOKEN
+    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
+    : "";
+}
+
+/**
+ * The device-resolved share context, passed to the Worker so it can call
+ * `/api/sharedownload` with its own cookie WITHOUT resolving the share page
+ * itself — the Worker's server-side resolve is dead (TeraBox serves datacenter
+ * IPs a stub page). The device does the residential-IP resolve; the Worker only
+ * supplies the login cookie.
+ */
+function originalContextQs(file: TeraboxFile): string {
+  const p = (v: string) => encodeURIComponent(v ?? "");
+  return (
+    `surl=${p(file.surl)}&fs_id=${p(file.fsId)}` +
+    `&shareid=${p(file.shareid)}&uk=${p(file.uk)}&sign=${p(file.sign)}` +
+    `&timestamp=${p(file.timestamp)}&jsToken=${p(file.jsToken)}` +
+    `&fn=${p(file.filename)}`
+  );
+}
+
 /**
  * The proxy URL that streams the ORIGINAL file (full quality). The signed dlink
  * needs the account's httpOnly cookie, so it goes through the proxy Worker when
@@ -669,13 +931,48 @@ export async function prepareTeraboxWatchUri(
 export function teraboxStreamUrl(file: TeraboxFile): string {
   if (!TERABOX_PROXY_URL) return file.dlink;
   const base = TERABOX_PROXY_URL.replace(/\/$/, "");
-  const token = TERABOX_PROXY_TOKEN
-    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
-    : "";
-  if (file.surl) {
-    return `${base}/?surl=${encodeURIComponent(file.surl)}&fs_id=${encodeURIComponent(file.fsId)}${token}`;
+  return `${base}/?${originalContextQs(file)}${proxyTokenQs()}`;
+}
+
+/** Result of preflighting the ORIGINAL download against the Worker. */
+export type OriginalAvailability =
+  | { ok: true }
+  | { ok: false; reason: "no_proxy" | "cookie_expired" | "error"; message?: string };
+
+/**
+ * Preflight the ORIGINAL download: ask the Worker to resolve a dlink with its
+ * cookie (no file transfer). Distinguishes an expired/invalid server cookie
+ * (`cookie_expired` → the UI prompts to refresh it) from other failures, so a
+ * background download isn't started only to save a broken error-page file.
+ */
+export async function checkTeraboxOriginal(
+  file: TeraboxFile,
+): Promise<OriginalAvailability> {
+  if (!TERABOX_PROXY_URL) return { ok: false, reason: "no_proxy" };
+  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
+  const url = `${base}/?resolve=1&${originalContextQs(file)}${proxyTokenQs()}`;
+  try {
+    const res = await fetch(url);
+    const json = (await res.json()) as {
+      ok?: boolean;
+      reason?: string;
+      errno?: number;
+      errmsg?: string;
+      error?: string;
+    };
+    if (json.ok) return { ok: true };
+    if (json.reason === "cookie_expired") {
+      return { ok: false, reason: "cookie_expired" };
+    }
+    return {
+      ok: false,
+      reason: "error",
+      message: json.error ?? json.errmsg ?? `errno ${json.errno ?? "?"}`,
+    };
+  } catch (err) {
+    console.warn("[terabox] original preflight failed:", String(err));
+    return { ok: false, reason: "error", message: String(err) };
   }
-  return `${base}/?url=${encodeURIComponent(file.dlink)}${token}`;
 }
 
 /** Build a `file://` URI from a raw path by percent-encoding each segment. */
@@ -797,32 +1094,56 @@ async function downloadHlsToFile(
     throw new TeraboxError("This stream has no segments to download.");
   }
 
+  // We now know the transcode's true size (ts_size), so progress is exact.
+  const tsSize = numParam(segments[0], "ts_size");
+  console.log(
+    `[terabox] download: ${segments.length} segment(s), target ts_size=${tsSize}`,
+  );
+
   if (dest.exists) dest.delete();
   dest.create();
   const handle = dest.open(FileMode.Append);
   let written = 0;
+  let shortSegments = 0;
   try {
     for (let i = 0; i < segments.length; i++) {
+      const expected = numParam(segments[i], "len");
       let buf: ArrayBuffer;
+      let status = 0;
       try {
         const res = await fetch(segments[i]);
-        if (!res.ok) throw new Error(`segment ${i} HTTP ${res.status}`);
+        status = res.status;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         buf = await res.arrayBuffer();
-      } catch {
+      } catch (err) {
+        console.warn(
+          `[terabox] download: segment ${i + 1}/${segments.length} failed ` +
+            `(status=${status}): ${String(err)}`,
+        );
         throw new TeraboxError(
           `Download interrupted (segment ${i + 1}/${segments.length}). Try again.`,
         );
       }
+      // Log any segment whose body doesn't match the requested byte range — a
+      // silent truncation (CDN honouring only part of the range) shows up here.
+      if (expected && buf.byteLength !== expected) {
+        console.warn(
+          `[terabox] download: segment ${i + 1} short — got ${buf.byteLength}B, ` +
+            `expected ${expected}B (status=${status})`,
+        );
+        shortSegments++;
+      }
       handle.writeBytes(new Uint8Array(buf));
       written += buf.byteLength;
-      // Extrapolate a total from the average segment size so the UI can show a
-      // sensible percentage; the true transcode size isn't known up front.
-      const total = Math.round((written / (i + 1)) * segments.length);
-      onProgress?.(written, total);
+      onProgress?.(written, tsSize || written);
     }
   } finally {
     handle.close();
   }
+  console.log(
+    `[terabox] download done: wrote ${written}B of ts_size=${tsSize} ` +
+      `(${shortSegments} short segment(s))`,
+  );
 }
 
 /**

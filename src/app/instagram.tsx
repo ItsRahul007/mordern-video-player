@@ -449,8 +449,8 @@ export default function InstagramScreen() {
                             type="small"
                             className="font-semibold text-white"
                           >
-                            {formatSize(prog.written)} / {formatSize(prog.total)}{" "}
-                            ({prog.pct}%)
+                            {formatSize(prog.written)} /{" "}
+                            {formatSize(prog.total)} ({prog.pct}%)
                           </ThemedText>
                         </View>
                       )}
@@ -519,7 +519,8 @@ export default function InstagramScreen() {
             Saves to a “Mordern Video Player” folder.
             {bgAvailable
               ? " Downloads continue in the background — watch progress in your notifications."
-              : ""}{" "}
+              : ""}
+            {"\n"}
             Tip: share a reel straight from Instagram, or paste a copied link
             above.
           </ThemedText>
@@ -561,7 +562,9 @@ export default function InstagramScreen() {
       <ConfirmSheet
         visible={permissionSheet}
         title="Allow file access"
-        message={'To save into the "Mordern Video Player" folder, allow access to all files.'}
+        message={
+          'To save into the "Mordern Video Player" folder, allow access to all files.'
+        }
         confirmLabel="Open settings"
         onConfirm={() => {
           setPermissionSheet(false);

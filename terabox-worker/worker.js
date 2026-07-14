@@ -75,10 +75,37 @@ export default {
       return json({ error: "Worker is missing the TERABOX_COOKIE secret" }, 500, cors);
     }
 
+    // Vend the login cookie to the app so a rotated cookie needs no app rebuild.
+    // MUST be token-gated (the cookie is a live session): refuse if no PROXY_TOKEN
+    // is configured, and the token was already checked above.
+    if (url.searchParams.get("cookie")) {
+      if (!env.PROXY_TOKEN) {
+        return json({ error: "cookie endpoint requires PROXY_TOKEN to be set" }, 403, cors);
+      }
+      return json({ cookie: env.TERABOX_COOKIE }, 200, cors);
+    }
+
     const surl = url.searchParams.get("surl");
     const dlinkParam = url.searchParams.get("url");
     const segParam = url.searchParams.get("seg");
     const range = request.headers.get("Range");
+
+    // One line per request so `wrangler tail` shows what was asked for.
+    console.log(
+      "REQ",
+      JSON.stringify({
+        endpoint: segParam ? "seg" : dlinkParam ? "dlink" : surl ? "surl" : "?",
+        surl: surl || undefined,
+        fs_id: url.searchParams.get("fs_id") || undefined,
+        hls: url.searchParams.get("hls") || undefined,
+        list: url.searchParams.get("list") || undefined,
+        quality: url.searchParams.get("quality") || undefined,
+        download: url.searchParams.get("download") || undefined,
+        resolve: url.searchParams.get("resolve") || undefined,
+        withContext: !!(url.searchParams.get("shareid") && url.searchParams.get("sign")),
+        range: range || undefined,
+      }),
+    );
 
     try {
       // A transcode-CDN segment, routed back through the Worker so it carries the
@@ -93,8 +120,29 @@ export default {
           if (!r.ok) return json(r, 200, cors);
           return json({ errno: 0, list: r.info.list }, 200, cors);
         }
-        // HLS path (fast transcoded stream — used for watch AND fast download).
+        // HLS path (transcoded stream — used for watch AND download). When the
+        // device supplies the resolved share context, resolve the manifest in
+        // our LOGGED-IN session (full-length transcode) and return it raw; the
+        // device fetches the open-CDN segments directly. Otherwise fall back to
+        // the (datacenter-IP-blocked) server-side resolve.
         if (url.searchParams.get("hls")) {
+          const shareid = url.searchParams.get("shareid");
+          const sign = url.searchParams.get("sign");
+          if (shareid && sign) {
+            return handleHlsFromContext(
+              env,
+              {
+                shareid,
+                uk: url.searchParams.get("uk"),
+                sign,
+                timestamp: url.searchParams.get("timestamp"),
+                jsToken: url.searchParams.get("jsToken"),
+                fsId: url.searchParams.get("fs_id"),
+              },
+              url.searchParams.get("quality") || "480",
+              cors,
+            );
+          }
           return handleHls(
             env,
             id,
@@ -105,9 +153,27 @@ export default {
             cors,
           );
         }
-        // Original file (download or watch): resolve a dlink (cached), stream it.
-        // Full quality, but TeraBox throttles it hard for non-VIP accounts.
-        const d = await getDlink(env, id, url.searchParams.get("fs_id"), ctx);
+        // Original file (download). Full quality, but TeraBox throttles it hard
+        // for non-VIP accounts. Prefer the device-supplied share context (its
+        // residential-IP resolve works; ours is datacenter-IP-blocked) — the
+        // Worker only adds the login cookie. `resolve=1` returns JSON (preflight,
+        // used to detect an expired cookie) instead of streaming the file.
+        const wantResolve = url.searchParams.get("resolve");
+        const shareid = url.searchParams.get("shareid");
+        const sign = url.searchParams.get("sign");
+        const d =
+          shareid && sign
+            ? await getDlinkFromContext(env, {
+                shareid,
+                uk: url.searchParams.get("uk"),
+                sign,
+                timestamp: url.searchParams.get("timestamp"),
+                jsToken: url.searchParams.get("jsToken"),
+                fsId: url.searchParams.get("fs_id"),
+                fn: url.searchParams.get("fn"),
+              })
+            : await getDlink(env, id, url.searchParams.get("fs_id"), ctx);
+        if (wantResolve) return json(d.ok ? { ok: true } : d, 200, cors);
         if (!d.ok) return json(d, 200, cors);
         return streamFile(d.dlink, env.TERABOX_COOKIE, d.filename, cors, range);
       }
@@ -129,6 +195,7 @@ async function resolveShare(env, surl) {
   const html = await pageRes.text();
   const origin = new URL(pageRes.url).origin;
   const jsToken = extractToken(html);
+  console.log("RESOLVE page", JSON.stringify({ status: pageRes.status, finalUrl: pageRes.url, htmlLen: html.length, jsToken: !!jsToken }));
   if (!jsToken) {
     return { ok: false, stage: "jsToken", error: "no jsToken", pageStatus: pageRes.status, finalUrl: pageRes.url, htmlLen: html.length };
   }
@@ -136,6 +203,7 @@ async function resolveShare(env, surl) {
   const qp = `app_id=250528&web=1&channel=dubox&clienttype=0&jsToken=${encodeURIComponent(jsToken)}&dp-logid=`;
   const apiH = { ...h, Referer: `${origin}/` };
   const info = await (await fetch(`${origin}/api/shorturlinfo?${qp}&shorturl=1${surl}&root=1`, { headers: apiH })).json();
+  console.log("RESOLVE shorturlinfo", JSON.stringify({ errno: info.errno, errmsg: info.errmsg, shareid: info.shareid, files: (info.list || []).length }));
   if (info.errno !== 0 || !info.shareid || !info.sign) {
     return { ok: false, stage: "shorturlinfo", errno: info.errno, errmsg: info.errmsg };
   }
@@ -169,7 +237,13 @@ async function handleHls(env, surl, fsIdWanted, quality, download, reqUrl, cors)
 
   const res = await fetch(streamUrl, { headers: { ...r.apiH, Referer: HLS_REFERER } });
   const text = await res.text();
-  if (!text.trim().startsWith("#EXTM3U")) {
+  const isManifest = text.trim().startsWith("#EXTM3U");
+  const tsSize = Number(/[?&]ts_size=(\d+)/.exec(text)?.[1] ?? 0);
+  console.log(
+    "HLS",
+    JSON.stringify({ quality, type, status: res.status, isManifest, tsSize, download: !!download }),
+  );
+  if (!isManifest) {
     // Not a manifest — usually a JSON errno (e.g. quality needs VIP, or expired).
     console.log("HLS FAILED", JSON.stringify({ status: res.status, type, body: text.slice(0, 300) }));
     return json({ stage: "streaming", type, status: res.status, body: text.slice(0, 400) }, 200, cors);
@@ -222,6 +296,9 @@ async function proxySegment(segUrl, cookie, cors, range) {
   if (range) headers.Range = range;
 
   const upstream = await fetch(segUrl, { headers, redirect: "follow" });
+  if (upstream.status !== 200 && upstream.status !== 206) {
+    console.log("SEG FAILED", JSON.stringify({ status: upstream.status, seg: segUrl.slice(0, 90) }));
+  }
   const out = new Headers();
   for (const k of ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"]) {
     const v = upstream.headers.get(k);
@@ -267,6 +344,120 @@ function downloadHlsConcat(segUrls, cookie, filename, cors) {
 }
 
 /**
+ * Errnos from /api/sharedownload that mean the login cookie is invalid/expired
+ * (so the app can prompt to refresh it), vs a share-level problem.
+ */
+function isAuthErrno(errno) {
+  return [-6, -7, 2, -21].includes(Number(errno));
+}
+
+/**
+ * Read a jsToken from a logged-in, non-share page. The public share page is the
+ * thing TeraBox serves datacenter IPs a stub for; a normal logged-in page (with
+ * our cookie) is usually fine and yields a token bound to OUR session — which is
+ * what /api/sharedownload validates against. Returns "" if none found.
+ *
+ * Cached per-isolate (~20 min) so the manifest/dlink calls don't re-fetch a page
+ * every time.
+ */
+let sessionTokenCache = { token: "", at: 0 };
+async function getSessionJsToken(env) {
+  const now = Date.now();
+  if (sessionTokenCache.token && now - sessionTokenCache.at < 20 * 60 * 1000) {
+    return sessionTokenCache.token;
+  }
+  for (const path of ["/main", "/disk/home", "/"]) {
+    try {
+      const res = await fetch(`${BASE}${path}`, {
+        headers: { "User-Agent": USER_AGENT, Cookie: env.TERABOX_COOKIE },
+        redirect: "follow",
+      });
+      const html = await res.text();
+      const t = extractToken(html);
+      console.log("JSTOKEN try", JSON.stringify({ path, status: res.status, htmlLen: html.length, found: !!t }));
+      if (t) {
+        sessionTokenCache = { token: t, at: now };
+        return t;
+      }
+    } catch (e) {
+      console.log("JSTOKEN err", path, String(e));
+    }
+  }
+  return "";
+}
+
+/**
+ * Resolve the transcoded HLS manifest for a file in the Worker's LOGGED-IN
+ * session, using device-supplied share context (the Worker can't resolve the
+ * share page from a datacenter IP). A logged-in request should return the
+ * FULL-LENGTH transcode, not the ~4-min anonymous preview. Returns the raw
+ * manifest text — its segments are open-CDN URLs the device fetches directly
+ * (no cookie, no datacenter block). On failure returns a JSON error object
+ * (`cookie_expired` on an auth errno).
+ */
+async function handleHlsFromContext(env, ctx, quality, cors) {
+  if (!ctx.shareid || !ctx.sign) {
+    return json({ ok: false, reason: "error", error: "missing share context" }, 200, cors);
+  }
+  const jsToken = (await getSessionJsToken(env)) || ctx.jsToken || "";
+  const type = HLS_TYPES[quality] || HLS_TYPES["480"];
+  const streamUrl =
+    `${BASE}/share/streaming?uk=${ctx.uk}&shareid=${ctx.shareid}` +
+    `&type=${type}&fid=${ctx.fsId}&sign=${encodeURIComponent(ctx.sign)}` +
+    `&timestamp=${ctx.timestamp}&jsToken=${encodeURIComponent(jsToken)}` +
+    `&isplayer=1&esl=1&ehps=1&clienttype=0&app_id=250528&web=1&channel=dubox`;
+  const res = await fetch(streamUrl, {
+    headers: { "User-Agent": USER_AGENT, Cookie: env.TERABOX_COOKIE, Referer: HLS_REFERER },
+  });
+  const text = await res.text();
+  const isManifest = text.trim().startsWith("#EXTM3U");
+  const tsSize = Number(/[?&]ts_size=(\d+)/.exec(text)?.[1] ?? 0);
+  const dur = [...text.matchAll(/#EXTINF:([\d.]+)/g)].reduce((s, m) => s + Number(m[1] || 0), 0);
+  console.log("HLS_CTX", JSON.stringify({ status: res.status, isManifest, tsSize, previewDur: dur }));
+  if (!isManifest) {
+    let errno;
+    try {
+      errno = JSON.parse(text).errno;
+    } catch {}
+    return json(
+      { ok: false, reason: isAuthErrno(errno) ? "cookie_expired" : "error", errno, body: text.slice(0, 200) },
+      200,
+      cors,
+    );
+  }
+  const out = new Headers({ "Content-Type": "application/x-mpegURL" });
+  for (const [k, v] of Object.entries(cors)) out.set(k, v);
+  return new Response(text, { headers: out });
+}
+
+/**
+ * Resolve a dlink from device-supplied share context (shareid/uk/sign/timestamp,
+ * all share-scoped) plus the Worker's login cookie. Uses the Worker's OWN jsToken
+ * when obtainable (session-consistent), falling back to the device's. Returns
+ * `{ ok:false, reason:"cookie_expired" }` on an auth errno so the app can prompt.
+ */
+async function getDlinkFromContext(env, ctx) {
+  if (!ctx.shareid || !ctx.sign) {
+    return { ok: false, reason: "error", error: "missing share context" };
+  }
+  const ownToken = await getSessionJsToken(env);
+  const jsToken = ownToken || ctx.jsToken || "";
+  const qp = `app_id=250528&web=1&channel=dubox&clienttype=0&jsToken=${encodeURIComponent(jsToken)}&dp-logid=`;
+  const apiH = { "User-Agent": USER_AGENT, Cookie: env.TERABOX_COOKIE, Referer: `${BASE}/` };
+  const api =
+    `${BASE}/api/sharedownload?${qp}&shareid=${ctx.shareid}&uk=${ctx.uk}` +
+    `&sign=${encodeURIComponent(ctx.sign)}&timestamp=${ctx.timestamp}` +
+    `&primaryid=${ctx.shareid}&product=share&nozip=0&fid_list=[${ctx.fsId}]`;
+  const dl = await (await fetch(api, { headers: apiH })).json();
+  const dlink = dl.dlink || (dl.list && dl.list[0] && dl.list[0].dlink);
+  console.log("SHAREDOWNLOAD", JSON.stringify({ usedOwnToken: !!ownToken, errno: dl.errno, errmsg: dl.errmsg, hasDlink: !!dlink }));
+  if (!dlink) {
+    return { ok: false, reason: isAuthErrno(dl.errno) ? "cookie_expired" : "error", errno: dl.errno, errmsg: dl.errmsg };
+  }
+  return { ok: true, dlink, filename: ctx.fn || "video" };
+}
+
+/**
  * Get a downloadable dlink for a file, caching it (~50 min) so repeated requests
  * — especially Range requests while streaming a video — don't re-resolve.
  */
@@ -275,6 +466,7 @@ async function getDlink(env, surl, fsIdWanted, ctx) {
   const cacheKey = new Request(`https://terabox-cache.local/dlink?surl=${surl}&fs_id=${fsIdWanted || ""}`);
   const hit = await cache.match(cacheKey);
   if (hit) {
+    console.log("GETDLINK cache hit", JSON.stringify({ surl, fsIdWanted }));
     return { ok: true, ...(await hit.json()) };
   }
 
@@ -290,6 +482,7 @@ async function getDlink(env, surl, fsIdWanted, ctx) {
     { headers: r.apiH },
   )).json();
   const dlink = dl.dlink || (dl.list && dl.list[0] && dl.list[0].dlink);
+  console.log("GETDLINK sharedownload", JSON.stringify({ errno: dl.errno, errmsg: dl.errmsg, hasDlink: !!dlink }));
   if (!dlink) return { ok: false, stage: "sharedownload", errno: dl.errno, errmsg: dl.errmsg };
 
   const data = { dlink, filename: file.server_filename };

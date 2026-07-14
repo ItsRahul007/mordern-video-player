@@ -24,15 +24,16 @@ import {
 } from "@/hooks/use-storage-permission";
 import { useTheme } from "@/hooks/use-theme";
 import {
+  TeraboxError,
+  checkTeraboxOriginal,
   extractSurl,
   fetchShareInfo,
   formatSize,
   prepareTeraboxWatchUri,
   saveTeraboxFile,
   startTeraboxDownload,
-  type TeraboxDownloadMode,
-  TeraboxError,
   teraboxBackgroundDownloadAvailable,
+  type TeraboxDownloadMode,
   type TeraboxFile,
   type TeraboxShare,
 } from "@/lib/terabox";
@@ -57,6 +58,8 @@ export default function TeraboxScreen() {
   const [downloadMode, setDownloadMode] = useState<TeraboxDownloadMode>("hls");
   // Which file is being prepared for online playback (resolving its stream).
   const [watchIndex, setWatchIndex] = useState<number | null>(null);
+  // Set when the Worker reports its TeraBox cookie has expired (original mode).
+  const [cookieExpired, setCookieExpired] = useState(false);
 
   // Android's DownloadManager gives real background downloads + a system progress
   // notification, but only for the single-URL "original" mode; HLS is fetched and
@@ -134,6 +137,33 @@ export default function TeraboxScreen() {
       setWatchIndex(null);
     }
   };
+
+  // Preflight the "original" download against the Worker before starting, so an
+  // expired server cookie surfaces as a clear warning instead of a broken file.
+  // Returns whether the download may proceed. No-op for the "fast" (HLS) mode.
+  const ensureOriginalOk = useCallback(
+    async (file: TeraboxFile): Promise<boolean> => {
+      if (downloadMode !== "original") return true;
+      const check = await checkTeraboxOriginal(file);
+      if (check.ok) {
+        setCookieExpired(false);
+        return true;
+      }
+      if (check.reason === "cookie_expired") {
+        setCookieExpired(true);
+        return false;
+      }
+      setErrorSheet({
+        title: "Can't get original",
+        message:
+          check.reason === "no_proxy"
+            ? "The download proxy isn't configured."
+            : (check.message ?? "Couldn't resolve the original file. Try again."),
+      });
+      return false;
+    },
+    [downloadMode],
+  );
 
   const runFetch = useCallback(async (link: string) => {
     const trimmed = link.trim();
@@ -273,6 +303,8 @@ export default function TeraboxScreen() {
   const onSaveAll = async () => {
     if (!share) return;
     if (!(await ensurePermission())) return;
+    // One cookie serves the whole share, so a single preflight covers all files.
+    if (!(await ensureOriginalOk(share.files[0]))) return;
 
     if (bgAvailable) {
       for (const [index] of share.files.entries()) {
@@ -322,16 +354,22 @@ export default function TeraboxScreen() {
     if (bgAvailable) {
       if (savedIndices.has(index) || bgProgress[index]) return;
       if (!(await ensurePermission())) return;
+      if (!(await ensureOriginalOk(share.files[index]))) return;
       await enqueueBackground(index);
       return;
     }
 
     if (saving || savingIndex !== null) return;
     if (!(await ensurePermission())) return;
+    if (!(await ensureOriginalOk(share.files[index]))) return;
     setSavingIndex(index);
     lastPct.current = -1;
     try {
-      await saveTeraboxFile(share.files[index], downloadMode, progressFor(index));
+      await saveTeraboxFile(
+        share.files[index],
+        downloadMode,
+        progressFor(index),
+      );
       setSavedIndices((prev) => new Set(prev).add(index));
     } catch (err) {
       console.warn("[terabox] save failed:", err);
@@ -359,7 +397,11 @@ export default function TeraboxScreen() {
       const p = bgProgress[index];
       return p && p.total > 0 ? p : null;
     }
-    if (savingIndex === index && dlProgress?.index === index && dlProgress.total > 0) {
+    if (
+      savingIndex === index &&
+      dlProgress?.index === index &&
+      dlProgress.total > 0
+    ) {
       return {
         written: dlProgress.written,
         total: dlProgress.total,
@@ -470,7 +512,9 @@ export default function TeraboxScreen() {
                       key={opt.key}
                       onPress={() => setDownloadMode(opt.key)}
                       disabled={anyDownloading}
-                      style={active ? { backgroundColor: colors.accent } : undefined}
+                      style={
+                        active ? { backgroundColor: colors.accent } : undefined
+                      }
                       className={`flex-1 items-center rounded-xl py-2 active:opacity-80 ${
                         anyDownloading ? "opacity-50" : ""
                       }`}
@@ -483,7 +527,9 @@ export default function TeraboxScreen() {
                       </ThemedText>
                       <ThemedText
                         className="text-xs"
-                        style={{ color: active ? "#ffffffcc" : colors.textSecondary }}
+                        style={{
+                          color: active ? "#ffffffcc" : colors.textSecondary,
+                        }}
                       >
                         {opt.sub}
                       </ThemedText>
@@ -492,6 +538,16 @@ export default function TeraboxScreen() {
                 })}
               </View>
             </View>
+
+            {cookieExpired && (
+              <View className="rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
+                <ThemedText type="small" style={{ color: colors.text }}>
+                  ⚠️ TeraBox login expired. Update the{" "}
+                  <ThemedText type="smallBold">TERABOX_COOKIE</ThemedText> secret
+                  in the Worker, then try again. (Fast downloads still work.)
+                </ThemedText>
+              </View>
+            )}
 
             <View className="gap-2">
               {share.files.map((file, i) => {
@@ -613,7 +669,8 @@ export default function TeraboxScreen() {
           Saves to a “Mordern Video Player” folder.
           {bgAvailable
             ? " Downloads continue in the background — watch progress in your notifications."
-            : ""}{" "}
+            : ""}
+          {"\n"}
           Tip: share a link straight from TeraBox, or paste a copied link above.
         </ThemedText>
       </ScrollView>

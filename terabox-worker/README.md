@@ -58,7 +58,14 @@ Worker; resolving the share (file list, thumbnail, size) still happens on-device
 | `GET /?surl=<id>&fs_id=<id>&hls=1&download=1` | The HLS segments concatenated into one **MPEG-TS** file (`.ts`), streamed as an attachment. Fast download at transcode quality. |
 | `GET /?seg=<encoded-segment-url>` | Internal — proxies a transcode-CDN segment with the Referer/cookie. |
 | `GET /?url=<dlink>` | Proxy a raw dlink. |
+| `GET /?cookie=1&token=<PROXY_TOKEN>` | Returns `{ "cookie": "<TERABOX_COOKIE>" }` so the app can run logged-in on-device (full-length HLS). **Token-gated** — requires `PROXY_TOKEN` to be set; the cookie is a live session. |
 | `GET /?debug=1` | Cookie health check. |
+
+> **Runtime cookie (no rebuild on rotation):** the app fetches the cookie from
+> `?cookie=1` at launch and caches it, instead of baking it into the bundle. When
+> the cookie expires, just `wrangler secret put TERABOX_COOKIE` — the app picks up
+> the new value on its next launch. This needs both `PROXY_TOKEN` (Worker secret)
+> and `EXPO_PUBLIC_TERABOX_PROXY_TOKEN` (app env) set to the same value.
 
 > **Why HLS?** TeraBox deliberately rate-caps the original-file dlink for non-VIP
 > accounts, so both direct downloads and dlink-based playback crawl at ~20-30 KB/s.
