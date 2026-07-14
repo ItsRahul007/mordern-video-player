@@ -27,15 +27,14 @@ import {
   extractSurl,
   fetchShareInfo,
   formatSize,
+  prepareTeraboxWatchUri,
   saveTeraboxFile,
   startTeraboxDownload,
   type TeraboxDownloadMode,
   TeraboxError,
   teraboxBackgroundDownloadAvailable,
   type TeraboxFile,
-  teraboxHlsUrl,
   type TeraboxShare,
-  teraboxStreamUrl,
 } from "@/lib/terabox";
 import {
   addDownloadCompleteListener,
@@ -51,15 +50,18 @@ export default function TeraboxScreen() {
   // A link shared into the app (TeraBox → Share → Video Player).
   const { sharedUrl } = useLocalSearchParams<{ sharedUrl?: string }>();
 
-  // Android's DownloadManager gives real background downloads + a system progress
-  // notification; elsewhere (iOS) we fall back to a foreground in-app download.
-  const bgAvailable = teraboxBackgroundDownloadAvailable();
-
   const [url, setUrl] = useState(sharedUrl ?? "");
   const [fetching, setFetching] = useState(false);
   // Download source: "hls" is the fast transcoded stream (default); "original"
   // is the full-quality file but TeraBox throttles it hard for non-VIP accounts.
   const [downloadMode, setDownloadMode] = useState<TeraboxDownloadMode>("hls");
+  // Which file is being prepared for online playback (resolving its stream).
+  const [watchIndex, setWatchIndex] = useState<number | null>(null);
+
+  // Android's DownloadManager gives real background downloads + a system progress
+  // notification, but only for the single-URL "original" mode; HLS is fetched and
+  // concatenated in-app (foreground). Elsewhere (iOS) everything is foreground.
+  const bgAvailable = teraboxBackgroundDownloadAvailable(downloadMode);
   const [saving, setSaving] = useState(false);
   const [share, setShare] = useState<TeraboxShare | null>(null);
   // Per-file state for the foreground (iOS) download path — single-flight.
@@ -103,18 +105,34 @@ export default function TeraboxScreen() {
     [],
   );
 
-  // Open the video for online playback. Prefer the fast transcoded HLS stream
-  // (what the TeraBox site itself plays); fall back to the throttled dlink.
-  const onWatch = (file: TeraboxFile) => {
-    const uri = teraboxHlsUrl(file) || teraboxStreamUrl(file);
-    if (!uri) {
+  // Open the video for online playback. Resolves the fast transcoded HLS stream
+  // on-device (writing a local .m3u8 whose segments stream straight from the CDN)
+  // and hands the player its file URI; falls back to the throttled dlink.
+  const onWatch = async (file: TeraboxFile, index: number) => {
+    if (watchIndex !== null) return;
+    setWatchIndex(index);
+    try {
+      const uri = await prepareTeraboxWatchUri(file);
+      if (!uri) {
+        setErrorSheet({
+          title: "Can't play",
+          message: "No playable URL for this file.",
+        });
+        return;
+      }
+      router.push({ pathname: "/player", params: { uri } });
+    } catch (err) {
+      console.warn("[terabox] watch failed:", err);
       setErrorSheet({
         title: "Can't play",
-        message: "No playable URL for this file.",
+        message:
+          err instanceof TeraboxError
+            ? err.message
+            : "Couldn't start playback. Please try again.",
       });
-      return;
+    } finally {
+      setWatchIndex(null);
     }
-    router.push({ pathname: "/player", params: { uri } });
   };
 
   const runFetch = useCallback(async (link: string) => {
@@ -493,14 +511,18 @@ export default function TeraboxScreen() {
                       contentFit="cover"
                       transition={150}
                     />
-                    {/* Tap the preview to watch online (streamed via proxy). */}
+                    {/* Tap the preview to watch online (HLS resolved on-device). */}
                     <Pressable
-                      onPress={() => onWatch(file)}
-                      disabled={listLocked}
+                      onPress={() => onWatch(file, i)}
+                      disabled={listLocked || watchIndex !== null}
                       className="absolute inset-0 items-center justify-center active:opacity-80"
                     >
                       <View className="h-14 w-14 items-center justify-center rounded-full bg-black/55">
-                        <Icon name="play" size={26} color="#ffffff" />
+                        {watchIndex === i ? (
+                          <ActivityIndicator color="#ffffff" />
+                        ) : (
+                          <Icon name="play" size={26} color="#ffffff" />
+                        )}
                       </View>
                     </Pressable>
                     {/* Filename, size and live progress — bottom-left. */}

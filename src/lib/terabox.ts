@@ -2,13 +2,20 @@
  * Resolve TeraBox share links to downloadable files and save them to a public
  * folder. For personal/offline use.
  *
- * How it works: TeraBox's share API needs a logged-in account session (the
- * httpOnly `ndus` cookie) and the CDN gates downloads behind it — which a mobile
- * app can't satisfy (Android hides httpOnly cookies; the CDN blocks cross-origin
- * reads). So both the resolve (file list) and the download run server-side in a
- * tiny Cloudflare Worker that holds the cookie (see /terabox-worker). This module
- * fetches the file list from the Worker, parses it, and saves downloaded files;
- * the Worker does the TeraBox API work. No in-app TeraBox login or WebView.
+ * How it works (on-device): TeraBox now blocks datacenter IPs — a server-side
+ * resolver (the old Cloudflare Worker) is served an empty stub page, so it can't
+ * read the share at all. But from a normal residential IP (the phone) the whole
+ * flow works WITHOUT any login: fetch the share page to pick up the anti-bot
+ * cookies (browserid/csrfToken, set automatically into the app's cookie store)
+ * and the page's jsToken, call `/api/shorturlinfo` for the file list + share
+ * signature, then hit `/share/streaming` for the transcoded HLS manifest. The
+ * HLS segments are served by an open CDN that needs no cookies/headers, so we can
+ * play them (via a local .m3u8) and download them (concatenated into one .ts)
+ * entirely on-device. No proxy, no TeraBox login, no WebView.
+ *
+ * The full-quality "original" file still sits behind a logged-in httpOnly cookie
+ * wall (its signed dlink 403s without the account session), so that mode is
+ * best-effort via the optional proxy Worker; HLS is the reliable path.
  *
  * Saves land in a "Mordern Video Player" folder at the storage root via the
  * native raw-Java copy (expo-file-system refuses to write to shared storage even
@@ -17,7 +24,7 @@
  * https://docs.expo.dev/versions/v56.0.0/sdk/filesystem/
  * https://docs.expo.dev/versions/v56.0.0/sdk/media-library/
  */
-import { Directory, File, Paths } from "expo-file-system";
+import { Directory, File, FileMode, Paths } from "expo-file-system";
 import { Asset } from "expo-media-library";
 import { Platform } from "react-native";
 
@@ -31,129 +38,54 @@ import {
 export const SAVE_DIR = "/storage/emulated/0/Mordern Video Player/TeraBox";
 
 /**
- * URL of the TeraBox download proxy (a Cloudflare Worker — see /terabox-worker).
- * The signed `dlink` 403s from the native downloader because it needs the
- * account's httpOnly session cookie, which a mobile app can't send. The Worker
- * does that authenticated fetch server-side and streams the file. When unset,
- * the app falls back to a (usually failing) direct download.
+ * Optional TeraBox download proxy (a Cloudflare Worker — see /terabox-worker),
+ * used ONLY for the "original" full-quality download, whose signed dlink needs
+ * the account's httpOnly session cookie the app can't send. Resolve and the HLS
+ * path no longer use it (they run on-device). When unset, "original" falls back
+ * to a direct (usually 403ing) dlink download.
  */
 export const TERABOX_PROXY_URL =
   process.env.EXPO_PUBLIC_TERABOX_PROXY_URL ?? "";
 const TERABOX_PROXY_TOKEN =
   process.env.EXPO_PUBLIC_TERABOX_PROXY_TOKEN ?? "";
 
+/** The h5 (mobile-web) origin we resolve against; may 3xx to a regional mirror. */
+const H5_ORIGIN = "https://www.1024tera.com";
+
+/** Common query params every h5 share API call carries. */
+const API_BASE_QS =
+  "app_id=250528&web=1&channel=dubox&clienttype=0&clientfrom=h5";
+
 /** Transcoded HLS quality variants. 480 works on any account; 720/1080 need VIP. */
 export type TeraboxQuality = "480" | "720" | "1080";
+
+/** The `/share/streaming` `type` value per quality (mirrors the TeraBox site). */
+const HLS_TYPES: Record<TeraboxQuality, string> = {
+  "480": "M3U8_FLV_264_480",
+  "720": "M3U8_AUTO_720",
+  "1080": "M3U8_FLV_264_1080",
+};
 
 /**
  * How to fetch the bytes:
  * - `"hls"`   — the transcoded HLS stream (fast, unthrottled CDN). Quality is
- *               capped at the transcode and the file is a `.ts` container.
- * - `"original"` — the original file via its signed dlink. Full quality, but
- *               TeraBox throttles it to ~20-30 KB/s for non-VIP accounts.
+ *               capped at the transcode and the file is a `.ts` container. This
+ *               is the reliable, fully on-device path.
+ * - `"original"` — the original file via its signed dlink. Full quality, but it
+ *               needs the account session (proxy Worker) and TeraBox throttles it
+ *               to ~20-30 KB/s for non-VIP accounts.
  */
 export type TeraboxDownloadMode = "hls" | "original";
 
-/**
- * URL of the transcoded HLS manifest for online playback — the same fast path
- * the TeraBox site itself uses (the original-file dlink is rate-capped for
- * non-VIP accounts). The Worker returns an `.m3u8` whose segments are proxied
- * back through it, so the player needs no special headers. Empty string when no
- * proxy is configured or the file has no surl (callers fall back to the dlink).
- */
-export function teraboxHlsUrl(
-  file: TeraboxFile,
-  quality: TeraboxQuality = "480",
-): string {
-  if (!TERABOX_PROXY_URL || !file.surl) return "";
-  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
-  const token = TERABOX_PROXY_TOKEN
-    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
-    : "";
-  return (
-    `${base}/hls/playlist.m3u8?surl=${encodeURIComponent(file.surl)}` +
-    `&fs_id=${encodeURIComponent(file.fsId)}&hls=1&quality=${quality}${token}`
-  );
-}
-
-/**
- * The URL the download fetches from, per {@link TeraboxDownloadMode}. HLS mode
- * hits the Worker's server-side segment-concat endpoint (one MPEG-TS stream);
- * original mode uses {@link teraboxStreamUrl} (the dlink via the proxy).
- */
-function teraboxDownloadUrl(
-  file: TeraboxFile,
-  mode: TeraboxDownloadMode,
-  quality: TeraboxQuality,
-): string {
-  if (mode === "original") return teraboxStreamUrl(file);
-  if (!TERABOX_PROXY_URL || !file.surl) return "";
-  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
-  const token = TERABOX_PROXY_TOKEN
-    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
-    : "";
-  return (
-    `${base}/hls/download.ts?surl=${encodeURIComponent(file.surl)}` +
-    `&fs_id=${encodeURIComponent(file.fsId)}&hls=1&download=1&quality=${quality}${token}`
-  );
-}
-
-/** The saved file name for a download: HLS downloads are `.ts` containers. */
-function downloadFileName(file: TeraboxFile, mode: TeraboxDownloadMode): string {
-  const name = sanitizeName(file.filename);
-  return mode === "hls" ? `${name.replace(/\.[^.]+$/, "")}.ts` : name;
-}
-
-/**
- * The proxy URL that streams a file — used both for downloading and for online
- * playback (the Worker serves the bytes with the session cookie). Returns the
- * raw dlink when no proxy is configured (won't authenticate, but it's the only
- * fallback). Empty string only if there's no dlink and no proxy.
- */
-export function teraboxStreamUrl(file: TeraboxFile): string {
-  if (!TERABOX_PROXY_URL) return file.dlink;
-  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
-  const token = TERABOX_PROXY_TOKEN
-    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
-    : "";
-  // Prefer the surl so the Worker re-resolves on its own (cookie's) domain —
-  // a dlink minted on a different mirror won't match the Worker's cookie.
-  if (file.surl) {
-    return `${base}/?surl=${encodeURIComponent(file.surl)}&fs_id=${encodeURIComponent(file.fsId)}${token}`;
-  }
-  return `${base}/?url=${encodeURIComponent(file.dlink)}${token}`;
-}
-
-/** Desktop UA for the direct-download fallback (used only when no proxy is set). */
-const DOWNLOAD_USER_AGENT =
+/** Desktop UA — TeraBox serves the full share page (with jsToken) to this. */
+const TERABOX_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /**
- * Headers for the file download. The CDN checks the User-Agent (must match the
- * one that minted the dlink) and the Referer (must be the originating TeraBox
- * mirror). The Referer is derived per-dlink from its host.
- */
-function downloadHeaders(dlink: string): Record<string, string> {
-  let referer = "https://www.terabox.com/";
-  try {
-    // d.1024tera.com → www.1024tera.com (the share page that minted the link).
-    const host = new URL(dlink).hostname.replace(/^[^.]+\./, "www.");
-    referer = `https://${host}/`;
-  } catch {
-    // keep the default
-  }
-  return {
-    "User-Agent": DOWNLOAD_USER_AGENT,
-    Referer: referer,
-    Accept: "*/*",
-  };
-}
-
-/**
  * The many mirror hosts TeraBox serves the same content under. A pasted link may
- * use any of them; we canonicalise to www.terabox.com (which the WebView session
- * is bound to) before hitting the API.
+ * use any of them; we only need to recognise them — the resolve always runs
+ * against {@link H5_ORIGIN} regardless of the pasted host.
  */
 const TERABOX_HOSTS = [
   "terabox.com",
@@ -193,36 +125,49 @@ export function isTeraboxUrl(rawUrl: string): boolean {
 /**
  * Pull the short-url id out of a share link. TeraBox links come as
  * `https://<host>/s/1XXXXXXXX` (the leading `1` is a prefix, not part of the id)
- * or `https://<host>/sharing/link?surl=XXXXXXXX`. Returns the bare id (no `1`),
- * which is what the API's `shorturl` param wants prefixed back with `1`.
+ * or with a `?surl=XXXXXXXX` query (`/sharing/link`, `/wap/share/filelist`, …).
+ * Returns the bare id, which the API's `shorturl` param wants prefixed back
+ * with `1`. The query form never carries the leading `1`, so it's left intact;
+ * only the `/s/1…` path form strips it.
  */
 export function extractSurl(rawUrl: string): string | null {
   const url = rawUrl.trim();
-  // ?surl= form (already without the leading 1).
+  // ?surl= form (already without the leading 1 — don't strip anything).
   const fromQuery = url.match(/[?&]surl=([A-Za-z0-9_-]+)/);
-  if (fromQuery) return fromQuery[1].replace(/^1/, "");
-  // /s/1XXXX form.
+  if (fromQuery) return fromQuery[1];
+  // /s/1XXXX form (the leading 1 is a prefix, not part of the id).
   const fromPath = url.match(/\/s\/1?([A-Za-z0-9_-]+)/);
   if (fromPath) return fromPath[1];
   return null;
 }
 
+/**
+ * Everything needed to build the authenticated `/share/streaming` and download
+ * URLs for a share — resolved once (on-device) and stamped onto each file.
+ */
+type ShareContext = {
+  shareid: string;
+  uk: string;
+  sign: string;
+  timestamp: string;
+  jsToken: string;
+  /** Final origin after any regional redirect (API calls hang off this). */
+  origin: string;
+};
+
 /** A single downloadable file from a TeraBox share. */
-export type TeraboxFile = {
+export type TeraboxFile = ShareContext & {
   /** Numeric file id, used as the stable React key and for logging. */
   fsId: string;
   filename: string;
-  /** Size in bytes (0 if unknown). */
+  /** Size in bytes of the ORIGINAL file (0 if unknown). */
   size: number;
   /** Preview image URL, if TeraBox provided one. */
   thumbnail: string | null;
-  /**
-   * The signed download URL from the API. May be short-lived and/or require the
-   * session; the download step handles failures by surfacing a friendly error.
-   */
+  /** Signed original-file dlink, if resolved (used by "original" mode). */
   dlink: string;
-  /** The share's short-url id, so the proxy can re-resolve on its own domain. */
-  surl?: string;
+  /** The share's short-url id (bare, no leading 1). */
+  surl: string;
 };
 
 export type TeraboxShare = {
@@ -233,7 +178,7 @@ export type TeraboxShare = {
 };
 
 /** Compact preview of a long string for logs. */
-function snippet(text: string, max = 600): string {
+function snippet(text: string, max = 300): string {
   const clean = text.replace(/\s+/g, " ").trim();
   return clean.length > max
     ? `${clean.slice(0, max)}…(${text.length} chars)`
@@ -253,135 +198,305 @@ export function formatSize(bytes: number): string {
   return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-/** One entry from the `share/list` response. */
+/**
+ * Extract the jsToken from the share page HTML. TeraBox embeds it as
+ * `window.jsToken = a};fn("<256-hex>")` — the `fn` body is a no-op that just
+ * assigns its argument, so the hex string IS the token. Handles both the raw and
+ * URL-encoded forms (the page ships it inside an `eval(decodeURIComponent(...))`).
+ */
+function extractJsToken(html: string): string | null {
+  let decoded = html;
+  try {
+    decoded = decodeURIComponent(html);
+  } catch {
+    // keep the raw html
+  }
+  const patterns = [
+    /fn\("([0-9a-fA-F]{60,})"\)/,
+    /fn%28%22([0-9a-fA-F]{60,})%22%29/,
+    /"jsToken"\s*:\s*"([0-9a-fA-F]{60,})"/,
+    /jsToken%22%3A%22([0-9a-fA-F]{60,})%22/,
+  ];
+  for (const p of patterns) {
+    const m = html.match(p) || decoded.match(p);
+    if (m && m[1]) return m[1];
+  }
+  return null;
+}
+
+/** One entry from a `shorturlinfo` / `share/list` response `list`. */
 type ListEntry = {
   fs_id?: number | string;
   server_filename?: string;
   size?: number | string;
   isdir?: number | string;
+  /** Full path within the share (`/Folder/Sub/file.mp4`); used to list folders. */
+  path?: string;
   dlink?: string;
-  thumbs?: { url3?: string; url2?: string; url1?: string };
+  thumbs?: { url3?: string; url2?: string; url1?: string; icon?: string };
 };
 
 /**
- * Parse the raw body of a `share/list?...&root=1` response (fetched inside the
- * logged-in WebView) into the share's downloadable files. Throws
- * {@link TeraboxError} with a user-facing message if the body isn't usable JSON,
- * the API reported an error, the share is a nested folder, or there's nothing to
- * download. Folders (`isdir=1`) are skipped — v1 only handles flat file shares.
+ * Bounds on how much of a share we enumerate, so a pathologically deep or huge
+ * folder can't spin forever. Personal-use shares are comfortably under these.
  */
-export function parseShareListResponse(
-  text: string,
-  surl: string,
-): TeraboxShare {
-  let json: { errno?: number; list?: ListEntry[]; title?: string };
-  try {
-    json = JSON.parse(text);
-  } catch {
-    console.warn("[terabox] response not JSON:", snippet(text));
-    throw new TeraboxError(
-      "Couldn't read this link. Make sure you're connected and try again.",
-    );
+const MAX_SHARE_FILES = 200;
+const MAX_FOLDER_VISITS = 60;
+
+type ShortUrlInfo = {
+  errno?: number;
+  errmsg?: string;
+  shareid?: number | string;
+  uk?: number | string;
+  sign?: string;
+  timestamp?: number | string;
+  title?: string;
+  list?: ListEntry[];
+};
+
+/** A friendly message for a shorturlinfo errno. */
+function errnoMessage(errno: number | undefined): string {
+  // -9 = file gone, 105 = bad link, -12 = needs password, 400210 = anti-bot.
+  if (errno === 105 || errno === -9) {
+    return "This TeraBox link is invalid or has expired.";
   }
-
-  if (json.errno && json.errno !== 0) {
-    console.warn(`[terabox] api errno=${json.errno}; body:`, snippet(text));
-    // errno 2 = bad/missing params, -9 = file doesn't exist, 105 = bad link.
-    throw new TeraboxError(
-      json.errno === 105 || json.errno === -9
-        ? "This TeraBox link is invalid or has expired."
-        : "TeraBox rejected this request. The link may be private or password-protected.",
-    );
+  if (errno === -12) {
+    return "This share is password-protected, which isn't supported.";
   }
-
-  const entries = json.list ?? [];
-  const files: TeraboxFile[] = [];
-  let skippedFolders = 0;
-  for (const entry of entries) {
-    if (String(entry.isdir) === "1") {
-      skippedFolders++;
-      continue;
-    }
-    if (!entry.fs_id) continue;
-    files.push({
-      fsId: String(entry.fs_id),
-      filename: entry.server_filename ?? `terabox_${entry.fs_id}`,
-      size: Number(entry.size) || 0,
-      thumbnail:
-        entry.thumbs?.url3 ?? entry.thumbs?.url2 ?? entry.thumbs?.url1 ?? null,
-      dlink: entry.dlink ?? "",
-      surl,
-    });
+  if (errno === 400210) {
+    return "TeraBox blocked the request. Please try fetching again.";
   }
-
-  console.log(
-    `[terabox] parsed ${entries.length} entr(ies), ${files.length} file(s), ${skippedFolders} folder(s) skipped`,
-  );
-
-  if (files.length === 0) {
-    throw new TeraboxError(
-      skippedFolders > 0
-        ? "This share is a folder. Open it and share an individual video link."
-        : "This share has no downloadable files.",
-    );
-  }
-
-  return { surl, title: json.title ?? null, files };
+  return "TeraBox rejected this request. The link may be private or restricted.";
 }
 
 /**
- * Fetch a share's file list from the proxy Worker (which resolves it on the
- * cookie's domain). Replaces the old in-app WebView resolve, so the app needs no
- * TeraBox login at all. Throws {@link TeraboxError} if the proxy isn't configured
- * or the resolve fails.
+ * Resolve a share on-device: GET the share page (which sets the anti-bot cookies
+ * into the app's cookie store and carries the jsToken), then call shorturlinfo
+ * for the file list + share signature. Runs from the device's residential IP, so
+ * it isn't hit by the datacenter-IP block that kills a server-side resolver.
+ * Throws {@link TeraboxError} with a user-facing message on any failure.
  */
-export async function fetchShareInfo(surl: string): Promise<TeraboxShare> {
-  if (!TERABOX_PROXY_URL) {
+async function resolveShareOnDevice(surl: string): Promise<TeraboxShare> {
+  const ua = { "User-Agent": TERABOX_USER_AGENT };
+  const pageUrl = `${H5_ORIGIN}/sharing/link?surl=${encodeURIComponent(surl)}`;
+
+  let pageRes: Response;
+  let html: string;
+  try {
+    pageRes = await fetch(pageUrl, { headers: ua });
+    html = await pageRes.text();
+  } catch (err) {
+    console.warn("[terabox] page fetch failed:", String(err));
+    throw new TeraboxError("Couldn't reach TeraBox. Check your connection.");
+  }
+
+  let origin = H5_ORIGIN;
+  try {
+    origin = new URL(pageRes.url).origin;
+  } catch {
+    // keep H5_ORIGIN
+  }
+
+  const jsToken = extractJsToken(html);
+  if (!jsToken) {
+    console.warn(
+      `[terabox] no jsToken (status=${pageRes.status}, htmlLen=${html.length}, finalUrl=${pageRes.url})`,
+    );
     throw new TeraboxError(
-      "TeraBox proxy isn't configured. Set EXPO_PUBLIC_TERABOX_PROXY_URL.",
+      "Couldn't read this share. TeraBox may be blocking the request — please try again.",
     );
   }
-  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
-  const token = TERABOX_PROXY_TOKEN
-    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
-    : "";
-  // Cache-bust: the resolve URL is otherwise identical per share, so Android's
-  // OkHttp response cache can serve a *stale* body — including a transient error
-  // page from an earlier failed resolve — even after the Worker starts returning
-  // success. The nonce keeps every fetch unique; no-store is a belt-and-braces
-  // hint for platforms that honour it.
-  const url = `${base}/?surl=${encodeURIComponent(surl)}&list=1${token}&_=${Date.now()}`;
 
+  const qs =
+    `${API_BASE_QS}&jsToken=${encodeURIComponent(jsToken)}&dp-logid=`;
+  const apiHeaders = { ...ua, Referer: pageUrl };
+
+  let info: ShortUrlInfo;
+  try {
+    const res = await fetch(
+      `${origin}/api/shorturlinfo?${qs}&shorturl=1${encodeURIComponent(surl)}&root=1`,
+      { headers: apiHeaders },
+    );
+    info = (await res.json()) as ShortUrlInfo;
+  } catch (err) {
+    console.warn("[terabox] shorturlinfo failed:", String(err));
+    throw new TeraboxError("Couldn't read this share right now. Please try again.");
+  }
+
+  if (info.errno !== 0 || !info.shareid || !info.sign) {
+    console.warn(
+      `[terabox] shorturlinfo errno=${info.errno} errmsg=${info.errmsg ?? ""}`,
+    );
+    throw new TeraboxError(errnoMessage(info.errno));
+  }
+
+  const ctx: ShareContext = {
+    shareid: String(info.shareid),
+    uk: String(info.uk),
+    sign: String(info.sign),
+    timestamp: String(info.timestamp),
+    jsToken,
+    origin,
+  };
+
+  const rootEntries = info.list ?? [];
+  // Walk the share breadth-first, descending into subfolders (a folder share's
+  // root is just the folder entry). shorturlinfo gives the share-level signature;
+  // each folder's contents come from share/list?dir=<path>.
+  const collected: ListEntry[] = [];
+  const queue: ListEntry[] = [...rootEntries];
+  let folderVisits = 0;
+  let truncated = false;
+  while (queue.length > 0) {
+    if (collected.length >= MAX_SHARE_FILES) {
+      truncated = true;
+      break;
+    }
+    const entry = queue.shift() as ListEntry;
+    if (String(entry.isdir) === "1") {
+      if (folderVisits >= MAX_FOLDER_VISITS) {
+        truncated = true;
+        continue;
+      }
+      folderVisits++;
+      const children = await listShareDir(
+        origin,
+        apiHeaders,
+        qs,
+        surl,
+        String(entry.path ?? ""),
+      );
+      queue.push(...children);
+    } else if (entry.fs_id) {
+      collected.push(entry);
+    }
+  }
+
+  const files: TeraboxFile[] = collected.map((entry) => ({
+    ...ctx,
+    fsId: String(entry.fs_id),
+    filename: entry.server_filename ?? `terabox_${entry.fs_id}`,
+    size: Number(entry.size) || 0,
+    thumbnail:
+      entry.thumbs?.url3 ??
+      entry.thumbs?.url2 ??
+      entry.thumbs?.url1 ??
+      entry.thumbs?.icon ??
+      null,
+    dlink: entry.dlink ?? "",
+    surl,
+  }));
+
+  console.log(
+    `[terabox] resolved ${files.length} file(s) across ${folderVisits} folder(s)${truncated ? " (truncated)" : ""}`,
+  );
+
+  if (files.length === 0) {
+    throw new TeraboxError("This share has no downloadable files.");
+  }
+
+  return { surl, title: info.title ?? topFolderName(rootEntries), files };
+}
+
+/**
+ * List one folder inside a share via `share/list?dir=<path>`. Returns its entries
+ * (files and subfolders); on any error returns [] so one bad folder doesn't sink
+ * the whole resolve.
+ */
+async function listShareDir(
+  origin: string,
+  headers: Record<string, string>,
+  qs: string,
+  surl: string,
+  dir: string,
+): Promise<ListEntry[]> {
+  const url =
+    `${origin}/share/list?${qs}&shorturl=${encodeURIComponent(surl)}` +
+    `&dir=${encodeURIComponent(dir)}&page=1&num=1000&by=name&order=asc`;
+  let json: { errno?: number; list?: ListEntry[] };
+  try {
+    const res = await fetch(url, { headers });
+    json = (await res.json()) as { errno?: number; list?: ListEntry[] };
+  } catch (err) {
+    console.warn(`[terabox] share/list failed (dir=${dir}):`, String(err));
+    return [];
+  }
+  if (json.errno !== 0) {
+    console.warn(`[terabox] share/list errno=${json.errno} (dir=${dir})`);
+    return [];
+  }
+  return json.list ?? [];
+}
+
+/** The share's top-level folder name (from the first entry's path), for a title. */
+function topFolderName(entries: ListEntry[]): string | null {
+  for (const entry of entries) {
+    const seg = String(entry.path ?? "")
+      .split("/")
+      .filter(Boolean)[0];
+    if (seg) return seg;
+  }
+  return null;
+}
+
+/**
+ * Fetch a share's file list, on-device. Throws {@link TeraboxError} on failure.
+ */
+export async function fetchShareInfo(surl: string): Promise<TeraboxShare> {
+  return resolveShareOnDevice(surl);
+}
+
+/** Build the authenticated `/share/streaming` HLS manifest URL for a file. */
+function streamingUrl(file: TeraboxFile, quality: TeraboxQuality): string {
+  const type = HLS_TYPES[quality] ?? HLS_TYPES["480"];
+  return (
+    `${file.origin}/share/streaming?uk=${encodeURIComponent(file.uk)}` +
+    `&shareid=${encodeURIComponent(file.shareid)}&type=${type}` +
+    `&fid=${encodeURIComponent(file.fsId)}&sign=${encodeURIComponent(file.sign)}` +
+    `&timestamp=${encodeURIComponent(file.timestamp)}` +
+    `&jsToken=${encodeURIComponent(file.jsToken)}` +
+    `&isplayer=1&esl=1&ehps=1&${API_BASE_QS}`
+  );
+}
+
+/**
+ * Fetch the transcoded HLS manifest text for a file. The `/share/streaming`
+ * endpoint needs the session cookies + jsToken (both held on-device); a
+ * non-manifest body means the quality isn't available (720/1080 need VIP) or the
+ * signature expired. Throws {@link TeraboxError} in that case.
+ */
+async function fetchHlsManifest(
+  file: TeraboxFile,
+  quality: TeraboxQuality,
+): Promise<string> {
   let text: string;
   try {
-    const res = await fetch(url, {
-      cache: "no-store",
-      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+    const res = await fetch(streamingUrl(file, quality), {
+      headers: { "User-Agent": TERABOX_USER_AGENT, Referer: `${file.origin}/` },
     });
     text = await res.text();
   } catch (err) {
-    console.warn("[terabox] info fetch failed:", String(err));
-    throw new TeraboxError("Couldn't reach the TeraBox proxy. Check your connection.");
+    console.warn("[terabox] streaming fetch failed:", String(err));
+    throw new TeraboxError("Couldn't reach TeraBox. Check your connection.");
   }
-  console.log(`[terabox] info response: ${text.length} chars`);
-  // The Worker returns the shorturlinfo-style { errno, list } body on success, so
-  // the same parser handles it. But a resolve *failure* comes back as
-  // { ok: false, stage, errno, … } at HTTP 200 — which the parser would otherwise
-  // mistake for an empty share ("no downloadable files"). Detect it here so a
-  // transient, retryable Worker hiccup reports honestly.
-  try {
-    const probe = JSON.parse(text) as { ok?: boolean; stage?: string };
-    if (probe.ok === false) {
-      console.warn(`[terabox] worker resolve failed at stage=${probe.stage}:`, snippet(text));
-      throw new TeraboxError(
-        "Couldn't read this share right now. Please try fetching again.",
-      );
-    }
-  } catch (err) {
-    if (err instanceof TeraboxError) throw err;
-    // Not JSON (or not the failure envelope) — let the main parser handle it.
+  if (!text.trim().startsWith("#EXTM3U")) {
+    console.warn(`[terabox] streaming q=${quality} not a manifest:`, snippet(text));
+    throw new TeraboxError(
+      quality === "480"
+        ? "Couldn't get a playable stream for this file."
+        : `The ${quality}p stream isn't available for this share.`,
+    );
   }
-  return parseShareListResponse(text, surl);
+  return text;
+}
+
+/** The absolute segment URLs from an HLS media playlist, in order. */
+function hlsSegmentUrls(manifest: string, baseUrl: string): string[] {
+  return manifest
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"))
+    .map((l) => (/^https?:\/\//.test(l) ? l : new URL(l, baseUrl).toString()));
 }
 
 /** Cache dir downloads land in before being moved to their final location. */
@@ -392,10 +507,47 @@ function cacheDir(): Directory {
 }
 
 /**
- * Build a `file://` URI from a raw path by percent-encoding each segment. The
- * new File/Directory API parses its argument as a `java.net.URI`, which throws on
- * raw spaces (and "Mordern Video Player" has them), so the path must be encoded.
+ * Resolve a local, playable URI for a file. Fetches the HLS manifest on-device
+ * (the site's fast transcoded stream) and writes it to a cache `.m3u8` whose
+ * segments are absolute, open-CDN URLs — so the player streams them directly with
+ * no headers. Falls back to the throttled dlink/proxy stream if HLS is
+ * unavailable. Returns "" if nothing is playable.
  */
+export async function prepareTeraboxWatchUri(
+  file: TeraboxFile,
+  quality: TeraboxQuality = "480",
+): Promise<string> {
+  try {
+    const manifest = await fetchHlsManifest(file, quality);
+    const local = new File(cacheDir(), `play_${file.fsId}_${quality}.m3u8`);
+    if (local.exists) local.delete();
+    local.write(manifest);
+    return local.uri;
+  } catch (err) {
+    console.warn("[terabox] watch prepare failed, trying dlink:", String(err));
+    return teraboxStreamUrl(file);
+  }
+}
+
+/**
+ * The proxy URL that streams the ORIGINAL file (full quality). The signed dlink
+ * needs the account's httpOnly cookie, so it goes through the proxy Worker when
+ * configured; otherwise the raw dlink (which usually 403s without the session).
+ * Empty string if there's neither.
+ */
+export function teraboxStreamUrl(file: TeraboxFile): string {
+  if (!TERABOX_PROXY_URL) return file.dlink;
+  const base = TERABOX_PROXY_URL.replace(/\/$/, "");
+  const token = TERABOX_PROXY_TOKEN
+    ? `&token=${encodeURIComponent(TERABOX_PROXY_TOKEN)}`
+    : "";
+  if (file.surl) {
+    return `${base}/?surl=${encodeURIComponent(file.surl)}&fs_id=${encodeURIComponent(file.fsId)}${token}`;
+  }
+  return `${base}/?url=${encodeURIComponent(file.dlink)}${token}`;
+}
+
+/** Build a `file://` URI from a raw path by percent-encoding each segment. */
 function pathToUri(path: string): string {
   return `file://${path.split("/").map(encodeURIComponent).join("/")}`;
 }
@@ -429,6 +581,12 @@ function sanitizeName(name: string): string {
   return name.replace(/[/\\:*?"<>|]/g, "_").trim() || "terabox";
 }
 
+/** The saved file name for a download: HLS downloads are `.ts` containers. */
+function downloadFileName(file: TeraboxFile, mode: TeraboxDownloadMode): string {
+  const name = sanitizeName(file.filename);
+  return mode === "hls" ? `${name.replace(/\.[^.]+$/, "")}.ts` : name;
+}
+
 /** Best-effort MIME from a filename's extension — labels the download notification. */
 function guessMimeType(name: string): string {
   const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
@@ -457,31 +615,31 @@ function guessMimeType(name: string): string {
 }
 
 /**
- * Whether TeraBox files can be saved as true background downloads (Android's
- * DownloadManager: survives backgrounding, shows a system progress notification).
- * When false, callers fall back to {@link saveTeraboxFile}'s foreground download.
+ * Whether a file can be enqueued as a system background download. Only the
+ * "original" mode can (a single URL the OS DownloadManager fetches). HLS is a
+ * multi-segment stream that has to be concatenated in-app, so it always uses the
+ * foreground download path regardless of this.
  */
-export function teraboxBackgroundDownloadAvailable(): boolean {
-  return isBackgroundDownloadAvailable();
+export function teraboxBackgroundDownloadAvailable(
+  mode: TeraboxDownloadMode = "hls",
+): boolean {
+  return mode === "original" && isBackgroundDownloadAvailable();
 }
 
 /**
- * Enqueue a TeraBox file as a system background download. The bytes are fetched by
- * the OS via the proxy {@link teraboxStreamUrl} (so the Worker applies the session
- * cookie), and the finished file is moved into {@link SAVE_DIR}. Returns the
- * download id — match it against the progress/complete events from
- * `@modules/media-downloader`. Android-only; throws {@link TeraboxError} on a bad
- * file. The caller must hold the all-files grant first (see ensurePermission).
+ * Enqueue the ORIGINAL file as a system background download (Android). HLS isn't
+ * supported here (it needs in-app concatenation) — callers must use
+ * {@link saveTeraboxFile} for HLS. Returns the DownloadManager id.
  */
 export async function startTeraboxDownload(
   file: TeraboxFile,
   mode: TeraboxDownloadMode = "hls",
-  quality: TeraboxQuality = "480",
 ): Promise<number> {
-  const url = teraboxDownloadUrl(file, mode, quality);
-  if (!url) {
-    throw new TeraboxError("No download URL for this file.");
+  if (mode !== "original") {
+    throw new TeraboxError("HLS downloads run in-app, not in the background.");
   }
+  const url = teraboxStreamUrl(file);
+  if (!url) throw new TeraboxError("No download URL for this file.");
   const name = downloadFileName(file, mode);
   return startBackgroundDownload({
     url,
@@ -492,11 +650,58 @@ export async function startTeraboxDownload(
 }
 
 /**
- * Download one file and save it. On Android it's copied into the public
- * {@link SAVE_DIR} folder via the native raw-Java copy (which also media-scans
- * it so it shows in the gallery) — this needs the all-files grant. On iOS it goes
- * to the photo library via expo-media-library. The temporary cache file is always
- * removed. Returns the saved path/asset id. Throws {@link TeraboxError}.
+ * Download the HLS stream into `dest` by fetching each segment and appending it,
+ * so memory stays flat (one segment at a time) even for a large video. Segments
+ * are open-CDN URLs needing no headers. Reports approximate byte progress
+ * (extrapolated from segment count, since the transcode's total size is unknown).
+ */
+async function downloadHlsToFile(
+  file: TeraboxFile,
+  quality: TeraboxQuality,
+  dest: File,
+  onProgress?: (written: number, total: number) => void,
+): Promise<void> {
+  const manifest = await fetchHlsManifest(file, quality);
+  const segments = hlsSegmentUrls(manifest, streamingUrl(file, quality));
+  if (segments.length === 0) {
+    throw new TeraboxError("This stream has no segments to download.");
+  }
+
+  if (dest.exists) dest.delete();
+  dest.create();
+  const handle = dest.open(FileMode.Append);
+  let written = 0;
+  try {
+    for (let i = 0; i < segments.length; i++) {
+      let buf: ArrayBuffer;
+      try {
+        const res = await fetch(segments[i]);
+        if (!res.ok) throw new Error(`segment ${i} HTTP ${res.status}`);
+        buf = await res.arrayBuffer();
+      } catch {
+        throw new TeraboxError(
+          `Download interrupted (segment ${i + 1}/${segments.length}). Try again.`,
+        );
+      }
+      handle.writeBytes(new Uint8Array(buf));
+      written += buf.byteLength;
+      // Extrapolate a total from the average segment size so the UI can show a
+      // sensible percentage; the true transcode size isn't known up front.
+      const total = Math.round((written / (i + 1)) * segments.length);
+      onProgress?.(written, total);
+    }
+  } finally {
+    handle.close();
+  }
+}
+
+/**
+ * Download one file and save it. HLS is fetched + concatenated on-device; the
+ * "original" mode uses the (proxied) dlink. On Android it's copied into the public
+ * {@link SAVE_DIR} folder via the native raw-Java copy (which also media-scans it)
+ * — this needs the all-files grant. On iOS it goes to the photo library. The temp
+ * cache file is always removed. Returns the saved path/asset id. Throws
+ * {@link TeraboxError}.
  */
 export async function saveTeraboxFile(
   file: TeraboxFile,
@@ -506,50 +711,50 @@ export async function saveTeraboxFile(
 ): Promise<string> {
   const filename = downloadFileName(file, mode);
   const emit = (m: string) => console.log(`[terabox] ${m}`);
+  emit(`download "${filename}" (${formatSize(file.size) || "?"}) via ${mode}`);
 
-  const usingProxy = !!TERABOX_PROXY_URL;
-  const downloadUrl = teraboxDownloadUrl(file, mode, quality);
-  if (!downloadUrl) {
-    throw new TeraboxError("No download URL for this file.");
-  }
-  // Via the proxy, the Worker sets the cookie/UA/Referer itself; a direct
-  // download still needs the browser-like headers (and usually 403s anyway).
-  const headers = usingProxy ? {} : downloadHeaders(file.dlink);
-  emit(`download "${filename}" (${formatSize(file.size) || "?"}) via ${mode}/${usingProxy ? "proxy" : "dlink"}`);
+  const cached = new File(cacheDir(), filename);
 
-  let downloaded: File | null = null;
   try {
-    // Clear any leftover from a previous attempt so the download doesn't fail
-    // on an already-existing destination.
-    const dest = new File(cacheDir(), filename);
-    if (dest.exists) dest.delete();
-    downloaded = await File.downloadFileAsync(downloadUrl, dest, {
-      headers,
-      onProgress: onProgress
-        ? ({ bytesWritten, totalBytes }) => onProgress(bytesWritten, totalBytes)
-        : undefined,
-    });
+    if (mode === "hls") {
+      await downloadHlsToFile(file, quality, cached, onProgress);
+    } else {
+      const url = teraboxStreamUrl(file);
+      if (!url) throw new TeraboxError("No download URL for this file.");
+      if (cached.exists) cached.delete();
+      await File.downloadFileAsync(url, cached, {
+        headers: TERABOX_PROXY_URL
+          ? {}
+          : {
+              "User-Agent": TERABOX_USER_AGENT,
+              Referer: `${file.origin}/`,
+              Accept: "*/*",
+            },
+        onProgress: onProgress
+          ? ({ bytesWritten, totalBytes }) => onProgress(bytesWritten, totalBytes)
+          : undefined,
+      });
+    }
   } catch (err) {
     emit(`download error: ${String(err)}`);
+    if (err instanceof TeraboxError) throw err;
     throw new TeraboxError(
       "Download failed. The link may have expired — fetch it again.",
     );
   }
 
-  const downloadedSize = downloaded.size ?? 0;
+  const downloadedSize = cached.size ?? 0;
   emit(`downloaded ${formatSize(downloadedSize) || `${downloadedSize}B`}`);
-  // A tiny "download" is almost always an HTML/JSON error page, not the video —
-  // the CDN rejected us (expired link, or it needs the session cookie).
+  // A tiny "download" is almost always an HTML/JSON error page, not the video.
   if (downloadedSize > 0 && downloadedSize < 4096) {
     emit(`too small — likely an error page, not the file`);
-    // Surface the body (e.g. the proxy's JSON error) to aid debugging.
     try {
-      emit(`body: ${(await downloaded.text()).slice(0, 200)}`);
+      emit(`body: ${(await cached.text()).slice(0, 200)}`);
     } catch {
       // best-effort
     }
     try {
-      downloaded.delete();
+      cached.delete();
     } catch {
       // best-effort
     }
@@ -561,11 +766,11 @@ export async function saveTeraboxFile(
   try {
     if (Platform.OS === "android") {
       const destPath = uniqueDestPath(filename);
-      const saved = await copyToPublicDir(uriToPath(downloaded.uri), destPath);
+      const saved = await copyToPublicDir(uriToPath(cached.uri), destPath);
       emit(`saved to ${saved}`);
       return saved;
     }
-    const asset = await Asset.create(downloaded.uri);
+    const asset = await Asset.create(cached.uri);
     emit(`saved to gallery (${asset.id})`);
     return asset.id;
   } catch (err) {
@@ -573,7 +778,7 @@ export async function saveTeraboxFile(
     throw new TeraboxError("Couldn't save the file to your device.");
   } finally {
     try {
-      downloaded.delete();
+      cached.delete();
     } catch {
       // best-effort cleanup of the cache copy
     }
