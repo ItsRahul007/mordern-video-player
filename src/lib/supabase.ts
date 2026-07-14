@@ -57,13 +57,19 @@ export async function insertAppOpens(rows: AppOpenInsert[]): Promise<boolean> {
   return res.ok;
 }
 
-/** Fetch every recorded app-open, newest first. */
-export async function fetchAppOpens(): Promise<OpenCount[]> {
+/**
+ * Fetch recorded app-opens, newest first. When `sinceIso` is given, only rows
+ * with an `opened_at` at or after that instant are returned (legacy rows with a
+ * null `opened_at` are excluded from a date-bounded query — they can't be
+ * placed on the timeline anyway).
+ */
+export async function fetchAppOpens(sinceIso?: string): Promise<OpenCount[]> {
   if (!configured) {
     throw new Error("Supabase is not configured");
   }
+  const since = sinceIso ? `&opened_at=gte.${sinceIso}` : "";
   const res = await fetch(
-    `${SUPABASE_URL}${TABLE}?select=id,opened_at,created_at&order=opened_at.desc.nullslast`,
+    `${SUPABASE_URL}${TABLE}?select=id,opened_at,created_at&order=opened_at.desc.nullslast${since}`,
     { headers: headers() },
   );
   if (!res.ok) {

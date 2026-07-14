@@ -16,9 +16,9 @@ const MAX_BAR_HEIGHT = 120;
  * expands to reveal the exact times. Data comes from the `open-count` table in
  * Supabase (see `useAppOpens`).
  */
-export function OpenStats() {
+export function OpenStats({ rangeDays = 30 }: { rangeDays?: number | null }) {
   const { colors } = useTheme();
-  const { days, total, isLoading, isError, refetch } = useAppOpens();
+  const { days, total, isLoading, isError, refetch } = useAppOpens(rangeDays);
 
   if (isLoading) {
     return (

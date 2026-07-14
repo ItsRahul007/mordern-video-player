@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { fetchAppOpens, type OpenCount } from "@/lib/supabase";
@@ -58,11 +59,23 @@ export function groupByDay(rows: OpenCount[]): DailyOpens[] {
   return [...buckets.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
 }
 
-/** Load app-open analytics from Supabase, grouped by day. */
-export function useAppOpens() {
+/**
+ * Load app-open analytics from Supabase, grouped by day.
+ *
+ * `rangeDays` bounds the query to opens within the last N days (filtered on
+ * `opened_at`). Pass `null` for all-time. Defaults to the last 30 days.
+ */
+export function useAppOpens(rangeDays: number | null = 30) {
+  const sinceIso = useMemo(() => {
+    if (rangeDays == null) return undefined;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - rangeDays);
+    return cutoff.toISOString();
+  }, [rangeDays]);
+
   const query = useQuery({
-    queryKey: ["app-opens"],
-    queryFn: fetchAppOpens,
+    queryKey: ["app-opens", rangeDays ?? "all"],
+    queryFn: () => fetchAppOpens(sinceIso),
     staleTime: 30_000,
   });
 

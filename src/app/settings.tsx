@@ -1,5 +1,6 @@
 import Constants from "expo-constants";
 import { useRouter } from "expo-router";
+import { useState } from "react";
 import { Pressable, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -17,10 +18,19 @@ const OPTIONS: { value: ThemePreference; label: string; icon: IconName }[] = [
   { value: "dark", label: "Dark", icon: "dark" },
 ];
 
+/** Date-range presets for the app-open stats. `null` means all-time. */
+const RANGE_OPTIONS: { value: number | null; label: string }[] = [
+  { value: 7, label: "7 days" },
+  { value: 30, label: "30 days" },
+  { value: 90, label: "90 days" },
+  { value: null, label: "All" },
+];
+
 export default function SettingsScreen() {
   const router = useRouter();
   const { preference, setPreference, colors } = useTheme();
   const { sort, setSort } = useSort();
+  const [rangeDays, setRangeDays] = useState<number | null>(7);
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top"]}>
@@ -101,7 +111,28 @@ export default function SettingsScreen() {
         <ThemedText type="muted" className="mb-2 px-1 uppercase">
           App opens
         </ThemedText>
-        <OpenStats />
+        <View className="mb-3 flex-row gap-2 rounded-2xl bg-surface p-1.5">
+          {RANGE_OPTIONS.map((option) => {
+            const active = rangeDays === option.value;
+            return (
+              <Pressable
+                key={option.label}
+                onPress={() => setRangeDays(option.value)}
+                className={`flex-1 items-center rounded-xl py-2.5 active:opacity-80 ${
+                  active ? "bg-blue-500" : ""
+                }`}
+              >
+                <ThemedText
+                  type="smallBold"
+                  className={active ? "text-white" : "text-muted"}
+                >
+                  {option.label}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
+        </View>
+        <OpenStats rangeDays={rangeDays} />
       </View>
       </ScrollView>
     </SafeAreaView>
