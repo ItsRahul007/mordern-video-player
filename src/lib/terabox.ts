@@ -39,6 +39,7 @@
  * https://docs.expo.dev/versions/v56.0.0/sdk/filesystem/
  * https://docs.expo.dev/versions/v56.0.0/sdk/media-library/
  */
+import CookieManager from "@preeternal/react-native-cookie-manager";
 import { Directory, File, FileMode, Paths } from "expo-file-system";
 import { Asset } from "expo-media-library";
 import { Platform } from "react-native";
@@ -67,13 +68,22 @@ const TERABOX_PROXY_TOKEN =
   process.env.EXPO_PUBLIC_TERABOX_PROXY_TOKEN ?? "";
 
 /** The h5 (mobile-web) origin we resolve against; may 3xx to a regional mirror. */
-// Must match the domain the login cookie is valid for — TeraBox sessions are
-// domain-bound (1024tera.com and 1024terabox.com are DIFFERENT registrable
-// domains, not subdomains of one parent, so a cookie captured on one 404s
-// "user not login" on the other). The Worker has used 1024terabox.com all
-// along and every resolve/sharedownload call there has succeeded with this
-// cookie — so the on-device resolve targets the same, proven domain.
+// Where the anonymous share resolve runs. Doesn't need to match the login
+// cookie's host — shorturlinfo/streaming are public and work regardless.
 const H5_ORIGIN = "https://www.1024terabox.com";
+
+/**
+ * The EXACT host the login cookie is bound to — verified via curl: both
+ * `www.1024terabox.com` and bare `1024terabox.com` report `errno:-6 "user not
+ * login"` for this cookie, while `dm.1024terabox.com` returns real account
+ * data. TeraBox session cookies are apparently host-only (no wildcard Domain
+ * attribute), bound to a REGIONAL routing subdomain (`dm` likely = the
+ * account's country, "IN" per shorturlinfo) rather than the registrable domain
+ * — so even a same-domain call on the wrong subdomain looks logged-out. Every
+ * authenticated on-device call (quota check, own-drive save/delete/stream,
+ * bdstoken) must target this exact host, not just "a 1024terabox.com host".
+ */
+const AUTH_ORIGIN = "https://dm.1024terabox.com";
 
 /** Common query params every h5 share API call carries. */
 const API_BASE_QS =
@@ -171,6 +181,7 @@ export async function ensureTeraboxCookie(force = false): Promise<void> {
         console.log(
           `[terabox] cookie: from worker (names=[${cookieNamesOf(json.cookie)}])`,
         );
+        await seedAuthCookieJar(activeCookie);
         return;
       }
       console.warn("[terabox] cookie: worker returned no cookie");
@@ -187,6 +198,7 @@ export async function ensureTeraboxCookie(force = false): Promise<void> {
       console.log(
         `[terabox] cookie: from cache (names=[${cookieNamesOf(cached)}])`,
       );
+      await seedAuthCookieJar(activeCookie);
       return;
     }
   } catch {
@@ -197,6 +209,51 @@ export async function ensureTeraboxCookie(force = false): Promise<void> {
   console.log(
     `[terabox] cookie: ${activeCookie ? `env fallback (names=[${cookieNamesOf(activeCookie)}])` : "none (anonymous)"}`,
   );
+  if (activeCookie) await seedAuthCookieJar(activeCookie);
+}
+
+/**
+ * Seed Android's native cookie jar with the login cookie for AUTH_ORIGIN.
+ * Necessary because React Native's networking bridge on Android silently
+ * REPLACES any manually-set `Cookie` header with whatever the native jar holds
+ * for that host (a long-documented RN/OkHttp behavior — see
+ * facebook/react-native#28456) — so just setting the header (teraboxHeaders)
+ * is not enough; the jar itself must hold the cookie, or every authenticated
+ * call looks logged-out no matter what header we send. iOS's fetch doesn't
+ * have this problem, but seeding is harmless there too.
+ */
+async function seedAuthCookieJar(cookie: string): Promise<void> {
+  const pairs = cookie
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const eq = p.indexOf("=");
+      return eq === -1 ? null : { name: p.slice(0, eq), value: p.slice(eq + 1) };
+    })
+    .filter((p): p is { name: string; value: string } => p !== null);
+
+  for (const { name, value } of pairs) {
+    try {
+      await CookieManager.set(AUTH_ORIGIN, {
+        name,
+        value,
+        domain: "dm.1024terabox.com",
+        path: "/",
+        secure: true,
+      });
+    } catch (err) {
+      console.warn(`[terabox] cookie jar set failed for ${name}:`, String(err));
+    }
+  }
+  try {
+    const stored = await CookieManager.get(AUTH_ORIGIN);
+    console.log(
+      `[terabox] cookie jar for ${AUTH_ORIGIN}: [${Object.keys(stored).join(",")}]`,
+    );
+  } catch (err) {
+    console.warn("[terabox] cookie jar readback failed:", String(err));
+  }
 }
 
 /**
@@ -212,7 +269,7 @@ export async function logTeraboxAccountInfo(): Promise<void> {
   if (!activeCookie) return;
   try {
     const res = await fetch(
-      `${H5_ORIGIN}/api/quota?checkfree=1&checkexpire=1&${API_BASE_QS}`,
+      `${AUTH_ORIGIN}/api/quota?checkfree=1&checkexpire=1&${API_BASE_QS}`,
       { headers: teraboxHeaders() },
     );
     const text = await res.text();
@@ -279,14 +336,18 @@ async function saveShareToOwnDrive(file: TeraboxFile): Promise<OwnFile> {
   const cached = ownDriveCache.get(file.fsId);
   if (cached) return cached;
 
-  const token = await ensureBdsToken(file.origin);
-  const referer = `${file.origin}/`;
+  // Login-dependent calls MUST use AUTH_ORIGIN — the exact host the cookie is
+  // bound to — not file.origin (the anonymous share page redirects wherever it
+  // likes, fine for unauthenticated calls but wrong here) and not just any
+  // 1024terabox.com host (the cookie is host-only, see AUTH_ORIGIN's doc).
+  const token = await ensureBdsToken(AUTH_ORIGIN);
+  const referer = `${AUTH_ORIGIN}/`;
 
   // Ensure the destination folder exists. errno!=0 here (e.g. "already exists")
   // is non-fatal — the transfer call below is what actually matters.
   try {
     const createRes = await fetch(
-      `${file.origin}/api/create?${API_BASE_QS}&a=commit&bdstoken=${encodeURIComponent(token)}&jsToken=${encodeURIComponent(file.jsToken)}&dp-logid=`,
+      `${AUTH_ORIGIN}/api/create?${API_BASE_QS}&a=commit&bdstoken=${encodeURIComponent(token)}&jsToken=${encodeURIComponent(file.jsToken)}&dp-logid=`,
       {
         method: "POST",
         headers: teraboxHeaders({
@@ -311,7 +372,7 @@ async function saveShareToOwnDrive(file: TeraboxFile): Promise<OwnFile> {
   };
   try {
     const transferRes = await fetch(
-      `${file.origin}/share/transfer?${API_BASE_QS}&ondup=newcopy&async=1` +
+      `${AUTH_ORIGIN}/share/transfer?${API_BASE_QS}&ondup=newcopy&async=1` +
         `&scene=purchased_list&bdstoken=&shareid=${encodeURIComponent(file.shareid)}` +
         `&from=${encodeURIComponent(file.uk)}&jsToken=${encodeURIComponent(file.jsToken)}&dp-logid=`,
       {
@@ -344,18 +405,21 @@ async function saveShareToOwnDrive(file: TeraboxFile): Promise<OwnFile> {
   return owned;
 }
 
-/** Best-effort cleanup: delete a file previously copied into the own drive. */
-async function deleteOwnFile(origin: string, shareFsId: string, owned: OwnFile): Promise<void> {
+/**
+ * Best-effort cleanup: delete a file previously copied into the own drive.
+ * Always targets AUTH_ORIGIN — the cookie's exact bound host.
+ */
+async function deleteOwnFile(shareFsId: string, owned: OwnFile): Promise<void> {
   ownDriveCache.delete(shareFsId);
   try {
-    const token = await ensureBdsToken(origin);
+    const token = await ensureBdsToken(AUTH_ORIGIN);
     const res = await fetch(
-      `${origin}/api/filemanager?${API_BASE_QS}&opera=delete&async=1&onnest=fail` +
+      `${AUTH_ORIGIN}/api/filemanager?${API_BASE_QS}&opera=delete&async=1&onnest=fail` +
         `&bdstoken=${encodeURIComponent(token)}`,
       {
         method: "POST",
         headers: teraboxHeaders({
-          Referer: `${origin}/`,
+          Referer: `${AUTH_ORIGIN}/`,
           "Content-Type": "application/x-www-form-urlencoded",
         }),
         body: `filelist=${encodeURIComponent(`["${owned.path}"]`)}`,
@@ -372,17 +436,17 @@ async function deleteOwnFile(origin: string, shareFsId: string, owned: OwnFile):
  * Fetch the HLS manifest for a file already in the own drive. Unlike a share's
  * `/share/streaming`, this needs only the file's own `path` — no shareid/uk/sign
  * — and (per a captured logged-in session) isn't capped to a short preview.
+ * Always targets AUTH_ORIGIN, same reasoning as {@link deleteOwnFile}.
  */
 async function fetchOwnFileManifest(
-  origin: string,
   path: string,
   quality: TeraboxQuality,
 ): Promise<string> {
   const type = HLS_TYPES[quality] ?? HLS_TYPES["480"];
   const url =
-    `${origin}/api/streaming?path=${encodeURIComponent(path)}` +
+    `${AUTH_ORIGIN}/api/streaming?path=${encodeURIComponent(path)}` +
     `&app_id=250528&clienttype=0&type=${type}&vip=0`;
-  const res = await fetch(url, { headers: teraboxHeaders({ Referer: `${origin}/` }) });
+  const res = await fetch(url, { headers: teraboxHeaders({ Referer: `${AUTH_ORIGIN}/` }) });
   const text = await res.text();
   console.log(`[terabox] own-file streaming: status=${res.status} len=${text.length}`);
   return text;
@@ -597,7 +661,17 @@ function errnoMessage(errno: number | undefined): string {
  * it isn't hit by the datacenter-IP block that kills a server-side resolver.
  * Throws {@link TeraboxError} with a user-facing message on any failure.
  */
+/**
+ * Bumped whenever this file changes in a way that's easy to silently run stale
+ * (e.g. a domain/const change) — logged first thing so a stale JS bundle is
+ * obvious immediately, before any network calls even start.
+ */
+const TERABOX_LIB_BUILD = "own-drive-v4-native-cookiejar";
+
 async function resolveShareOnDevice(surl: string): Promise<TeraboxShare> {
+  console.log(
+    `[terabox] lib build=${TERABOX_LIB_BUILD} H5_ORIGIN=${H5_ORIGIN} AUTH_ORIGIN=${AUTH_ORIGIN}`,
+  );
   await ensureTeraboxCookie();
   const pageUrl = `${H5_ORIGIN}/sharing/link?surl=${encodeURIComponent(surl)}`;
   console.log(
@@ -905,7 +979,7 @@ async function fetchHlsManifest(
     console.log(`[terabox] hls fetch: q=${quality} path=on-device logged-in (own-drive)`);
     try {
       const owned = await saveShareToOwnDrive(file);
-      const text = await fetchOwnFileManifest(file.origin, owned.path, quality);
+      const text = await fetchOwnFileManifest(owned.path, quality);
       if (text.trim().startsWith("#EXTM3U")) {
         return { text, ownFile: owned };
       }
@@ -914,7 +988,7 @@ async function fetchHlsManifest(
         `[terabox] own-file streaming q=${quality} not a manifest: errno=${errno} errmsg=${errmsg} body=${snippet(text)}`,
       );
       // Own copy didn't help — clean it up and fall through to the share path.
-      await deleteOwnFile(file.origin, file.fsId, owned);
+      await deleteOwnFile(file.fsId, owned);
     } catch (err) {
       console.warn("[terabox] own-drive flow failed, falling back:", String(err));
     }
@@ -1166,7 +1240,7 @@ export async function prepareTeraboxWatchUri(
       // in the account if the app is closed mid-watch.
       console.log(`[terabox] own-drive cleanup for watch scheduled in ${WATCH_CLEANUP_DELAY_MS / 60000}min`);
       setTimeout(() => {
-        void deleteOwnFile(file.origin, file.fsId, ownFile);
+        void deleteOwnFile(file.fsId, ownFile);
       }, WATCH_CLEANUP_DELAY_MS);
     }
     return local.uri;
@@ -1429,7 +1503,7 @@ async function downloadHlsToFile(
 
   if (ownFile) {
     // Download has every byte on disk now — safe to clean up the own-drive copy.
-    await deleteOwnFile(file.origin, file.fsId, ownFile);
+    await deleteOwnFile(file.fsId, ownFile);
   }
 }
 
