@@ -13,14 +13,20 @@
  * play them (via a local .m3u8) and download them (concatenated into one .ts)
  * entirely on-device. No proxy, no TeraBox login, no WebView.
  *
- * Anonymous `/share/streaming` only transcodes a ~4-min window of longer videos.
- * To get the FULL length, the on-device resolve + streaming run LOGGED-IN from the
- * phone's residential IP (which returns the full-length transcode; the datacenter
- * Worker can't — its IP is blocked at the streaming endpoint). The login cookie is
- * fetched at RUNTIME from the Worker's token-gated `?cookie=1` endpoint (so a
- * rotated cookie needs only a `wrangler secret put`, no app rebuild), cached in
- * SQLite as a backup, and falls back to `EXPO_PUBLIC_TERABOX_COOKIE`. See
- * {@link ensureTeraboxCookie}.
+ * A SHARE's `/share/streaming` only ever transcodes a short (~4-min) preview
+ * window, even logged in — confirmed by testing the same account's web session.
+ * TeraBox's own site works around this by first "saving" the shared file into
+ * your own drive, then streaming/downloading it as an owned file, which isn't
+ * capped (see {@link fetchHlsManifest}, {@link saveShareToOwnDrive}). We
+ * replicate that: resolve the share as usual, copy it into a folder in the
+ * account (`/api/create` + `/share/transfer`), stream from `/api/streaming?path=`
+ * (no shareid/uk/sign needed — just the file's own path), then delete the copy
+ * once done with it ({@link deleteOwnFile}) so it doesn't pile up in the
+ * account's storage quota. Falls back to the capped share preview if any of this
+ * fails. The login cookie is fetched at RUNTIME from the Worker's token-gated
+ * `?cookie=1` endpoint (so a rotated cookie needs only a `wrangler secret put`,
+ * no app rebuild), cached in SQLite as a backup, and falls back to
+ * `EXPO_PUBLIC_TERABOX_COOKIE`. See {@link ensureTeraboxCookie}.
  *
  * The full-quality "original" file still sits behind a logged-in httpOnly cookie
  * wall (its signed dlink 403s without the account session), so that mode is
@@ -61,7 +67,13 @@ const TERABOX_PROXY_TOKEN =
   process.env.EXPO_PUBLIC_TERABOX_PROXY_TOKEN ?? "";
 
 /** The h5 (mobile-web) origin we resolve against; may 3xx to a regional mirror. */
-const H5_ORIGIN = "https://www.1024tera.com";
+// Must match the domain the login cookie is valid for — TeraBox sessions are
+// domain-bound (1024tera.com and 1024terabox.com are DIFFERENT registrable
+// domains, not subdomains of one parent, so a cookie captured on one 404s
+// "user not login" on the other). The Worker has used 1024terabox.com all
+// along and every resolve/sharedownload call there has succeeded with this
+// cookie — so the on-device resolve targets the same, proven domain.
+const H5_ORIGIN = "https://www.1024terabox.com";
 
 /** Common query params every h5 share API call carries. */
 const API_BASE_QS =
@@ -185,6 +197,195 @@ export async function ensureTeraboxCookie(force = false): Promise<void> {
   console.log(
     `[terabox] cookie: ${activeCookie ? `env fallback (names=[${cookieNamesOf(activeCookie)}])` : "none (anonymous)"}`,
   );
+}
+
+/**
+ * One-time diagnostic: confirm the cookie is actually recognized as a real
+ * logged-in session (not merely accepted-but-ignored), and log any VIP/tier
+ * field TeraBox returns — the ~4-min transcode cap may be a VIP-only feature
+ * rather than a login gate, in which case a free account stays capped even
+ * logged in. `/api/quota` is a lightweight endpoint that errnos out (-6 "user
+ * not login") for an invalid/expired cookie, so a clean `errno:0` here proves
+ * the session itself is good, isolating the cap question to account tier.
+ */
+export async function logTeraboxAccountInfo(): Promise<void> {
+  if (!activeCookie) return;
+  try {
+    const res = await fetch(
+      `${H5_ORIGIN}/api/quota?checkfree=1&checkexpire=1&${API_BASE_QS}`,
+      { headers: teraboxHeaders() },
+    );
+    const text = await res.text();
+    console.log(`[terabox] account quota check: status=${res.status} body=${snippet(text, 500)}`);
+  } catch (err) {
+    console.warn("[terabox] account quota check failed:", String(err));
+  }
+}
+
+/**
+ * TeraBox caps SHARE streaming to a short preview (see the module doc) — but
+ * playing/downloading a file already in your OWN drive isn't capped. So for a
+ * logged-in session, we replicate the site's own "Save" flow: copy the shared
+ * file into a folder in your account, stream/download it from there, then
+ * delete the copy. Confirmed via a captured browser session (chrome net-export)
+ * showing `GET /api/streaming?path=<ownPath>&type=...` — no shareid/uk/sign,
+ * just the file's own path — returning multiple real transcode segments where
+ * the anonymous/share preview only ever returns one capped object.
+ */
+const OWN_DRIVE_FOLDER = "/ModernVideoPlayer";
+
+type OwnFile = { path: string; fsId: string };
+
+/** Files already copied into the account this session, keyed by share fs_id. */
+const ownDriveCache = new Map<string, OwnFile>();
+
+/**
+ * The CSRF-style `bdstoken` needed for mutating own-drive calls (create/delete;
+ * `transfer` works without it). Cached for the session — like `jsToken`, it's
+ * embedded in a logged-in account page's HTML, not returned by any JSON API, so
+ * we fetch a normal page and regex it out.
+ */
+let bdsToken = "";
+
+async function ensureBdsToken(origin: string): Promise<string> {
+  if (bdsToken) return bdsToken;
+  for (const path of ["/main", "/disk/home", "/"]) {
+    try {
+      const res = await fetch(`${origin}${path}`, { headers: teraboxHeaders() });
+      const html = await res.text();
+      const m = /bdstoken["']?\s*[:=]\s*["']([0-9a-f]{32})["']/.exec(html);
+      console.log(
+        `[terabox] bdstoken try ${path}: status=${res.status} htmlLen=${html.length} found=${!!m}`,
+      );
+      if (m) {
+        bdsToken = m[1];
+        return bdsToken;
+      }
+    } catch (err) {
+      console.warn(`[terabox] bdstoken fetch ${path} failed:`, String(err));
+    }
+  }
+  return "";
+}
+
+/**
+ * Copy a shared file into the account's own drive (mirrors the site's "Save"
+ * button: `/api/create` to ensure the destination folder, then
+ * `/share/transfer` to do the copy). Cached per share fs_id for the session, so
+ * watching then downloading the same file doesn't save it twice. Throws
+ * {@link TeraboxError} if the copy fails.
+ */
+async function saveShareToOwnDrive(file: TeraboxFile): Promise<OwnFile> {
+  const cached = ownDriveCache.get(file.fsId);
+  if (cached) return cached;
+
+  const token = await ensureBdsToken(file.origin);
+  const referer = `${file.origin}/`;
+
+  // Ensure the destination folder exists. errno!=0 here (e.g. "already exists")
+  // is non-fatal — the transfer call below is what actually matters.
+  try {
+    const createRes = await fetch(
+      `${file.origin}/api/create?${API_BASE_QS}&a=commit&bdstoken=${encodeURIComponent(token)}&jsToken=${encodeURIComponent(file.jsToken)}&dp-logid=`,
+      {
+        method: "POST",
+        headers: teraboxHeaders({
+          Referer: referer,
+          "Content-Type": "application/x-www-form-urlencoded",
+        }),
+        body:
+          `path=${encodeURIComponent(OWN_DRIVE_FOLDER)}&isdir=1&method=post` +
+          `&dataType=json&bdstoken=${encodeURIComponent(token)}`,
+      },
+    );
+    const createJson = (await createRes.json()) as { errno?: number };
+    console.log(`[terabox] own-drive create folder: errno=${createJson.errno}`);
+  } catch (err) {
+    console.warn("[terabox] own-drive create folder failed (continuing):", String(err));
+  }
+
+  let transferJson: {
+    errno?: number;
+    errmsg?: string;
+    extra?: { list?: { to?: string; to_fs_id?: number | string }[] };
+  };
+  try {
+    const transferRes = await fetch(
+      `${file.origin}/share/transfer?${API_BASE_QS}&ondup=newcopy&async=1` +
+        `&scene=purchased_list&bdstoken=&shareid=${encodeURIComponent(file.shareid)}` +
+        `&from=${encodeURIComponent(file.uk)}&jsToken=${encodeURIComponent(file.jsToken)}&dp-logid=`,
+      {
+        method: "POST",
+        headers: teraboxHeaders({
+          Referer: referer,
+          "Content-Type": "application/x-www-form-urlencoded",
+        }),
+        body:
+          `fsidlist=${encodeURIComponent(`["${file.fsId}"]`)}` +
+          `&path=${encodeURIComponent(OWN_DRIVE_FOLDER)}`,
+      },
+    );
+    transferJson = await transferRes.json();
+  } catch (err) {
+    console.warn("[terabox] own-drive transfer failed:", String(err));
+    throw new TeraboxError("Couldn't save this share to your TeraBox drive.");
+  }
+  const entry = transferJson.extra?.list?.[0];
+  console.log(
+    `[terabox] own-drive transfer: errno=${transferJson.errno} errmsg=${transferJson.errmsg ?? ""} ` +
+      `to=${entry?.to} to_fs_id=${entry?.to_fs_id}`,
+  );
+  if (transferJson.errno !== 0 || !entry?.to) {
+    throw new TeraboxError("Couldn't save this share to your TeraBox drive.");
+  }
+
+  const owned: OwnFile = { path: entry.to, fsId: String(entry.to_fs_id) };
+  ownDriveCache.set(file.fsId, owned);
+  return owned;
+}
+
+/** Best-effort cleanup: delete a file previously copied into the own drive. */
+async function deleteOwnFile(origin: string, shareFsId: string, owned: OwnFile): Promise<void> {
+  ownDriveCache.delete(shareFsId);
+  try {
+    const token = await ensureBdsToken(origin);
+    const res = await fetch(
+      `${origin}/api/filemanager?${API_BASE_QS}&opera=delete&async=1&onnest=fail` +
+        `&bdstoken=${encodeURIComponent(token)}`,
+      {
+        method: "POST",
+        headers: teraboxHeaders({
+          Referer: `${origin}/`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        }),
+        body: `filelist=${encodeURIComponent(`["${owned.path}"]`)}`,
+      },
+    );
+    const json = (await res.json()) as { errno?: number };
+    console.log(`[terabox] own-drive cleanup: errno=${json.errno} path=${owned.path}`);
+  } catch (err) {
+    console.warn("[terabox] own-drive cleanup failed (non-fatal):", String(err));
+  }
+}
+
+/**
+ * Fetch the HLS manifest for a file already in the own drive. Unlike a share's
+ * `/share/streaming`, this needs only the file's own `path` — no shareid/uk/sign
+ * — and (per a captured logged-in session) isn't capped to a short preview.
+ */
+async function fetchOwnFileManifest(
+  origin: string,
+  path: string,
+  quality: TeraboxQuality,
+): Promise<string> {
+  const type = HLS_TYPES[quality] ?? HLS_TYPES["480"];
+  const url =
+    `${origin}/api/streaming?path=${encodeURIComponent(path)}` +
+    `&app_id=250528&clienttype=0&type=${type}&vip=0`;
+  const res = await fetch(url, { headers: teraboxHeaders({ Referer: `${origin}/` }) });
+  const text = await res.text();
+  console.log(`[terabox] own-file streaming: status=${res.status} len=${text.length}`);
+  return text;
 }
 
 /** Standard headers for on-device TeraBox requests, incl. the login cookie if set. */
@@ -402,6 +603,7 @@ async function resolveShareOnDevice(surl: string): Promise<TeraboxShare> {
   console.log(
     `[terabox] resolve start: surl=${surl} loggedIn=${isTeraboxLoggedIn()} cookie=${cookieDiag()}`,
   );
+  if (isTeraboxLoggedIn()) await logTeraboxAccountInfo();
 
   let pageRes: Response;
   let html: string;
@@ -626,26 +828,34 @@ async function fetchHlsManifestViaProxy(
   }
 }
 
+/** Result of fetching an HLS manifest: the text, plus the own-drive copy if one was made. */
+type ManifestFetch = { text: string; ownFile?: OwnFile };
+
+/** Parse `{errno, errmsg}` out of a non-manifest JSON error body, best-effort. */
+function parseStreamingError(text: string): { errno: unknown; errmsg: unknown } {
+  try {
+    const j = JSON.parse(text);
+    return { errno: j.errno, errmsg: j.errmsg };
+  } catch {
+    return { errno: undefined, errmsg: undefined };
+  }
+}
+
 /**
- * Fetch the transcoded HLS manifest text for a file. Prefers the logged-in proxy
- * Worker (full-length transcode); falls back to the on-device anonymous
- * `/share/streaming` (capped to a ~4-min preview) when the proxy is unavailable.
- * A non-manifest body means the quality isn't available (720/1080 need VIP) or
- * the signature expired. Throws {@link TeraboxError} in that case.
+ * Fetch the capped anonymous/share `/share/streaming` preview directly (or the
+ * proxy Worker's logged-in manifest, when there's no on-device cookie at all).
+ * Extracted so the multi-sample loop in {@link fetchFullStream} can call this
+ * directly once the own-drive path is known to be failing, instead of retrying
+ * (and re-failing) the own-drive save on every sample. Throws
+ * {@link TeraboxError} if nothing playable comes back.
  */
-async function fetchHlsManifest(
+async function fetchAnonymousManifest(
   file: TeraboxFile,
   quality: TeraboxQuality,
-): Promise<string> {
-  // With an on-device cookie (Option B) the streaming call is already logged-in
-  // from a residential IP — full length, and better than the datacenter Worker
-  // (which the streaming endpoint blocks). Only fall back to the Worker when no
-  // on-device cookie is configured.
-  const path = activeCookie ? "on-device logged-in" : "on-device anonymous";
-  console.log(`[terabox] hls fetch: q=${quality} path=${path}`);
+): Promise<ManifestFetch> {
   if (!activeCookie) {
     const viaProxy = await fetchHlsManifestViaProxy(file, quality);
-    if (viaProxy) return viaProxy;
+    if (viaProxy) return { text: viaProxy };
   }
 
   let res: Response;
@@ -665,16 +875,7 @@ async function fetchHlsManifest(
       `isManifest=${isManifest} ts_size=${isManifest ? manifestTsSize(text) : 0}`,
   );
   if (!isManifest) {
-    // Surface the API errno so a cap/verify/VIP rejection is obvious.
-    let errno: unknown;
-    let errmsg: unknown;
-    try {
-      const j = JSON.parse(text);
-      errno = j.errno;
-      errmsg = j.errmsg;
-    } catch {
-      // not JSON
-    }
+    const { errno, errmsg } = parseStreamingError(text);
     console.warn(
       `[terabox] streaming q=${quality} not a manifest: errno=${errno} errmsg=${errmsg} body=${snippet(text)}`,
     );
@@ -684,7 +885,43 @@ async function fetchHlsManifest(
         : `The ${quality}p stream isn't available for this share.`,
     );
   }
-  return text;
+  return { text };
+}
+
+/**
+ * Fetch the transcoded HLS manifest text for a file. When logged in, saves the
+ * share to the own drive first and streams it from there — TeraBox caps SHARE
+ * streaming to a short preview regardless of login, but an owned file isn't
+ * capped (confirmed via a captured browser session). Falls back to the
+ * anonymous/share `/share/streaming` (or the proxy Worker) if that fails for any
+ * reason, so watch/download still works, just capped. Throws {@link TeraboxError}
+ * only if every path fails.
+ */
+async function fetchHlsManifest(
+  file: TeraboxFile,
+  quality: TeraboxQuality,
+): Promise<ManifestFetch> {
+  if (activeCookie) {
+    console.log(`[terabox] hls fetch: q=${quality} path=on-device logged-in (own-drive)`);
+    try {
+      const owned = await saveShareToOwnDrive(file);
+      const text = await fetchOwnFileManifest(file.origin, owned.path, quality);
+      if (text.trim().startsWith("#EXTM3U")) {
+        return { text, ownFile: owned };
+      }
+      const { errno, errmsg } = parseStreamingError(text);
+      console.warn(
+        `[terabox] own-file streaming q=${quality} not a manifest: errno=${errno} errmsg=${errmsg} body=${snippet(text)}`,
+      );
+      // Own copy didn't help — clean it up and fall through to the share path.
+      await deleteOwnFile(file.origin, file.fsId, owned);
+    } catch (err) {
+      console.warn("[terabox] own-drive flow failed, falling back:", String(err));
+    }
+  } else {
+    console.log(`[terabox] hls fetch: q=${quality} path=on-device anonymous`);
+  }
+  return fetchAnonymousManifest(file, quality);
 }
 
 /** The `ts_size` (full transcode size) advertised by a manifest's segments. */
@@ -701,33 +938,56 @@ function manifestTsSize(manifest: string): number {
 const STREAM_SAMPLE_ATTEMPTS = 4;
 
 /**
- * Fetch the transcoded stream and expand TeraBox's short preview window into a
- * manifest covering the whole object (see {@link expandTranscodedManifest}).
- * Samples the endpoint a few times and keeps the largest object, since each call
- * can return a different-sized transcode. Falls back to the preview as-is if it
- * isn't the expected byte-range form.
+ * Fetch the transcoded stream for a file, full-length if possible.
+ *
+ * When logged in, {@link fetchHlsManifest} streams from a copy in the account's
+ * own drive — per a captured browser session this manifest already covers the
+ * real duration (multiple distinct transcode objects), unlike a share's capped
+ * preview, so it's used as-is with no further paging. The `ownFile` is returned
+ * so the caller can delete the copy once done with it.
+ *
+ * Otherwise (no cookie, own-drive save failed, or the manifest still looks like
+ * a short single-object preview) falls back to sampling the anonymous/share
+ * endpoint a few times — it hands back a different-sized transcode object per
+ * call — and expanding the largest one's byte-range window to cover it fully
+ * (see {@link expandTranscodedManifest}); still capped to that object's length.
  */
 async function fetchFullStream(
   file: TeraboxFile,
   quality: TeraboxQuality,
 ): Promise<FullManifest> {
-  // A logged-in session (on-device cookie, or the proxy) returns a consistent,
-  // full-length manifest, so one fetch is enough. Anonymous on-device fetches
-  // vary in size per call, so sample a few and keep the largest.
   await ensureTeraboxCookie();
-  const attempts =
-    isTeraboxLoggedIn() || TERABOX_PROXY_URL ? 1 : STREAM_SAMPLE_ATTEMPTS;
   console.log(
-    `[terabox] fetchFullStream: q=${quality} attempts=${attempts} loggedIn=${isTeraboxLoggedIn()}`,
+    `[terabox] fetchFullStream: q=${quality} loggedIn=${isTeraboxLoggedIn()}`,
   );
-  let sample = "";
-  let bestTs = -1;
-  for (let i = 0; i < attempts; i++) {
-    const candidate = await fetchHlsManifest(file, quality);
-    const ts = manifestTsSize(candidate);
+
+  const first = await fetchHlsManifest(file, quality);
+  if (first.ownFile) {
+    // Own-drive manifest: trust it as the real, un-truncated playlist.
+    const segments = hlsSegmentUrls(first.text, file.origin);
+    logManifestDiagnostics(first.text, null, quality);
+    console.log(
+      `[terabox] own-drive manifest: ${segments.length} segment(s), ` +
+        `ts_size(s) seen=${[...new Set(first.text.match(/[?&]ts_size=(\d+)/g) ?? [])].join(",")}`,
+    );
+    return { manifest: first.text, segments, ownFile: first.ownFile };
+  }
+
+  // Anonymous/share fallback (own-drive failed, or no cookie at all): each call
+  // returns a different-sized, differently-windowed capped object — sample a
+  // few and keep the largest before expanding it, rather than committing to
+  // whatever random window the first call happened to return.
+  const attempts = STREAM_SAMPLE_ATTEMPTS;
+  let sample = first.text;
+  let bestTs = manifestTsSize(first.text);
+  for (let i = 1; i < attempts; i++) {
+    // Own-drive already failed on `first` — go straight to the anonymous/share
+    // fetch instead of re-attempting (and re-failing) the own-drive save again.
+    const candidate = await fetchAnonymousManifest(file, quality);
+    const ts = manifestTsSize(candidate.text);
     if (ts > bestTs) {
       bestTs = ts;
-      sample = candidate;
+      sample = candidate.text;
     }
   }
   console.log(`[terabox] picked largest object: ts_size=${bestTs}`);
@@ -760,7 +1020,12 @@ function setParam(url: string, name: string, value: string | number): string {
  * sample window's bytes-per-second ratio (used for the seek bar; playback of the
  * full stream doesn't depend on their accuracy).
  */
-type FullManifest = { manifest: string; segments: string[] };
+type FullManifest = {
+  manifest: string;
+  segments: string[];
+  /** Set when streamed from a copy in the own drive — the caller should delete it once done. */
+  ownFile?: OwnFile;
+};
 
 /** Roughly how many seconds of video each rebuilt segment should span. */
 const SEGMENT_TARGET_SECONDS = 10;
@@ -882,15 +1147,28 @@ function cacheDir(): Directory {
  * no headers. Falls back to the throttled dlink/proxy stream if HLS is
  * unavailable. Returns "" if nothing is playable.
  */
+/** How long to leave a watch's own-drive copy before cleaning it up. */
+const WATCH_CLEANUP_DELAY_MS = 15 * 60 * 1000;
+
 export async function prepareTeraboxWatchUri(
   file: TeraboxFile,
   quality: TeraboxQuality = "480",
 ): Promise<string> {
   try {
-    const { manifest } = await fetchFullStream(file, quality);
+    const { manifest, ownFile } = await fetchFullStream(file, quality);
     const local = new File(cacheDir(), `play_${file.fsId}_${quality}.m3u8`);
     if (local.exists) local.delete();
     local.write(manifest);
+    if (ownFile) {
+      // Segment URLs are signed/CDN-hosted, not re-checked against the account
+      // per request, so deleting the own-drive copy after a viewing-sized delay
+      // (rather than the moment playback starts) is safe and avoids leaving it
+      // in the account if the app is closed mid-watch.
+      console.log(`[terabox] own-drive cleanup for watch scheduled in ${WATCH_CLEANUP_DELAY_MS / 60000}min`);
+      setTimeout(() => {
+        void deleteOwnFile(file.origin, file.fsId, ownFile);
+      }, WATCH_CLEANUP_DELAY_MS);
+    }
     return local.uri;
   } catch (err) {
     console.warn("[terabox] watch prepare failed, trying dlink:", String(err));
@@ -1089,13 +1367,17 @@ async function downloadHlsToFile(
   dest: File,
   onProgress?: (written: number, total: number) => void,
 ): Promise<void> {
-  const { segments } = await fetchFullStream(file, quality);
+  const { segments, ownFile } = await fetchFullStream(file, quality);
   if (segments.length === 0) {
     throw new TeraboxError("This stream has no segments to download.");
   }
 
-  // We now know the transcode's true size (ts_size), so progress is exact.
-  const tsSize = numParam(segments[0], "ts_size");
+  // We now know the transcode's true size, so progress is exact. An own-drive
+  // manifest can span several distinct transcode objects (each with its own
+  // ts_size), so sum the distinct sizes rather than trusting just segments[0].
+  const tsSize = [
+    ...new Set(segments.map((s) => numParam(s, "ts_size")).filter(Boolean)),
+  ].reduce((a, b) => a + b, 0);
   console.log(
     `[terabox] download: ${segments.length} segment(s), target ts_size=${tsSize}`,
   );
@@ -1144,6 +1426,11 @@ async function downloadHlsToFile(
     `[terabox] download done: wrote ${written}B of ts_size=${tsSize} ` +
       `(${shortSegments} short segment(s))`,
   );
+
+  if (ownFile) {
+    // Download has every byte on disk now — safe to clean up the own-drive copy.
+    await deleteOwnFile(file.origin, file.fsId, ownFile);
+  }
 }
 
 /**

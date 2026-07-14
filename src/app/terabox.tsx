@@ -123,7 +123,9 @@ export default function TeraboxScreen() {
         });
         return;
       }
-      router.push({ pathname: "/player", params: { uri } });
+      // TeraBox streams are resolved, short-lived URIs — don't pollute resume
+      // history with a position that won't exist to resume into next time.
+      router.push({ pathname: "/player", params: { uri, ephemeral: "1" } });
     } catch (err) {
       console.warn("[terabox] watch failed:", err);
       setErrorSheet({

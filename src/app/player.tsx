@@ -30,14 +30,23 @@ type Orientation = "landscape" | "portrait";
 
 export default function PlayerScreen() {
   const router = useRouter();
-  const { albumId, id, uri: externalUri } = useLocalSearchParams<{
+  const {
+    albumId,
+    id,
+    uri: externalUri,
+    ephemeral,
+  } = useLocalSearchParams<{
     albumId?: string;
     id?: string;
     uri?: string;
+    ephemeral?: string;
   }>();
   // External mode: a single video handed in by another app ("Open with").
   // There's no folder, so there's no playlist and no next/prev.
   const isExternal = !!externalUri;
+  // Some sources (e.g. TeraBox streams) are resolved, short-lived URIs that
+  // shouldn't pollute resume/watch-history — nothing to resume into next time.
+  const skipHistory = ephemeral === "1";
   const { data: videos, isLoading } = useFolderVideos(
     isExternal ? undefined : albumId,
   );
@@ -229,7 +238,7 @@ export default function PlayerScreen() {
   // ~0 and defeat the resume).
   const resumeTargetRef = useRef<{ id: string; position: number } | null>(null);
   useEffect(() => {
-    if (!current) {
+    if (!current || skipHistory) {
       resumeTargetRef.current = null;
       return;
     }
@@ -241,7 +250,7 @@ export default function PlayerScreen() {
       entry.position < entry.duration - RESUME_THRESHOLD
         ? { id: current.id, position: entry.position }
         : null;
-  }, [current?.id, current]);
+  }, [current?.id, current, skipHistory]);
 
   // Seek to the captured position once the video is ready to play.
   const { status } = useEvent(player, "statusChange", {
@@ -261,12 +270,13 @@ export default function PlayerScreen() {
 
   // Record progress as the video plays.
   useEventListener(player, "timeUpdate", ({ currentTime }) => {
-    if (current) playbackStore.record(current.id, currentTime, player.duration);
+    if (current && !skipHistory)
+      playbackStore.record(current.id, currentTime, player.duration);
   });
 
   // On pause, commit the position immediately so the library UI reflects it.
   useEventListener(player, "playingChange", ({ isPlaying }) => {
-    if (!isPlaying && current && player.duration > 0) {
+    if (!isPlaying && current && player.duration > 0 && !skipHistory) {
       playbackStore.record(current.id, player.currentTime, player.duration);
       playbackStore.flush();
     }
@@ -302,7 +312,7 @@ export default function PlayerScreen() {
 
   // Mark complete and auto-advance when the current video finishes.
   useEventListener(player, "playToEnd", () => {
-    if (current)
+    if (current && !skipHistory)
       playbackStore.record(current.id, player.duration, player.duration);
     if (hasNext) goNext();
   });
