@@ -64,8 +64,16 @@ export function groupByDay(rows: OpenCount[]): DailyOpens[] {
  *
  * `rangeDays` bounds the query to opens within the last N days (filtered on
  * `opened_at`). Pass `null` for all-time. Defaults to the last 30 days.
+ *
+ * `deviceId` scopes the query to a single install:
+ * - a string  → only that install's opens (the normal, per-user view),
+ * - `undefined` → every install's opens (the hidden all-devices view),
+ * - `null`    → the id hasn't resolved yet; the query stays disabled.
  */
-export function useAppOpens(rangeDays: number | null = 30) {
+export function useAppOpens(
+  rangeDays: number | null = 30,
+  deviceId?: string | null,
+) {
   const sinceIso = useMemo(() => {
     if (rangeDays == null) return undefined;
     const cutoff = new Date();
@@ -74,9 +82,10 @@ export function useAppOpens(rangeDays: number | null = 30) {
   }, [rangeDays]);
 
   const query = useQuery({
-    queryKey: ["app-opens", rangeDays ?? "all"],
-    queryFn: () => fetchAppOpens(sinceIso),
+    queryKey: ["app-opens", rangeDays ?? "all", deviceId ?? "all"],
+    queryFn: () => fetchAppOpens(sinceIso, deviceId ?? undefined),
     staleTime: 30_000,
+    enabled: deviceId !== null,
   });
 
   return {

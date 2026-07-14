@@ -16,11 +16,23 @@ const MAX_BAR_HEIGHT = 120;
  * expands to reveal the exact times. Data comes from the `open-count` table in
  * Supabase (see `useAppOpens`).
  */
-export function OpenStats({ rangeDays = 30 }: { rangeDays?: number | null }) {
+export function OpenStats({
+  rangeDays = 30,
+  deviceId,
+}: {
+  rangeDays?: number | null;
+  /** See `useAppOpens`: string = this install, undefined = all, null = resolving. */
+  deviceId?: string | null;
+}) {
   const { colors } = useTheme();
-  const { days, total, isLoading, isError, refetch } = useAppOpens(rangeDays);
+  const { days, total, isLoading, isError, refetch } = useAppOpens(
+    rangeDays,
+    deviceId,
+  );
 
-  if (isLoading) {
+  // `null` means the device id hasn't resolved yet and the query is disabled;
+  // treat it as a loading state rather than "no data".
+  if (deviceId === null || isLoading) {
     return (
       <View className="items-center rounded-2xl bg-surface py-8">
         <ActivityIndicator color={colors.accent} />
