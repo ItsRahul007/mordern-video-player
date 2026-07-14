@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import { fetchAppOpens, type OpenCount } from "@/lib/supabase";
 
@@ -86,6 +86,9 @@ export function useAppOpens(
     queryFn: () => fetchAppOpens(sinceIso, deviceId ?? undefined),
     staleTime: 30_000,
     enabled: deviceId !== null,
+    // Keep the previous range/scope's data on screen while the new query loads
+    // so the chart doesn't collapse to a spinner and shift the layout.
+    placeholderData: keepPreviousData,
   });
 
   return {

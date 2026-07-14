@@ -25,7 +25,7 @@ export function OpenStats({
   deviceId?: string | null;
 }) {
   const { colors } = useTheme();
-  const { days, total, isLoading, isError, refetch } = useAppOpens(
+  const { days, total, isLoading, isFetching, isError, refetch } = useAppOpens(
     rangeDays,
     deviceId,
   );
@@ -65,8 +65,11 @@ export function OpenStats({
 
   return (
     <View className="rounded-2xl bg-surface p-4">
-      <View className="mb-4 flex-row items-baseline justify-between">
-        <ThemedText type="smallBold">Total opens</ThemedText>
+      <View className="mb-4 flex-row items-center justify-between">
+        <View className="flex-row items-center gap-2">
+          <ThemedText type="smallBold">Total opens</ThemedText>
+          {isFetching && <ActivityIndicator size="small" color={colors.accent} />}
+        </View>
         <ThemedText type="subtitle">{total}</ThemedText>
       </View>
 
