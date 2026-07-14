@@ -158,6 +158,7 @@ function downloadHeaders(dlink: string): Record<string, string> {
 const TERABOX_HOSTS = [
   "terabox.com",
   "terabox.app",
+  "1024tera.com",
   "1024terabox.com",
   "teraboxapp.com",
   "terafileshare.com",
