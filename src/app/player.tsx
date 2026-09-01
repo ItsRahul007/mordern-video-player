@@ -97,6 +97,9 @@ export default function PlayerScreen() {
 
   const player = useVideoPlayer(current?.uri ?? null, (p) => {
     p.timeUpdateEventInterval = 0.5;
+    // Android defaults this to false (unlike iOS), so changing playbackRate
+    // shifts audio pitch up/down instead of just speeding up/slowing down.
+    p.preservesPitch = true;
   });
 
   // The decoder reports the true display size of the loaded video (already

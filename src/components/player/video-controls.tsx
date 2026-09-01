@@ -64,6 +64,9 @@ const MIN_ZOOM = 1;
 const MAX_ZOOM = 2;
 /** Seconds skipped per full-width horizontal drag across the video. */
 const DRAG_SEEK_SPAN = 90;
+/** How long to hold before playback jumps to HOLD_SPEED_RATE. */
+const HOLD_SPEED_DELAY = 500;
+const HOLD_SPEED_RATE = 2;
 
 type FeedbackState = {
   dir: "forward" | "backward";
@@ -120,6 +123,7 @@ export function VideoControls({
   const [verticalFeedback, setVerticalFeedback] =
     useState<VerticalFeedback>(null);
   const [sheet, setSheet] = useState<SheetMode>(null);
+  const [holdSpeedActive, setHoldSpeedActive] = useState(false);
 
   const { isPlaying } = useEvent(player, "playingChange", {
     isPlaying: player.playing,
@@ -198,6 +202,12 @@ export function VideoControls({
   const singleTapRef = useRef<GestureType | undefined>(undefined);
   const doubleTapRef = useRef<GestureType | undefined>(undefined);
   const dragRef = useRef<GestureType | undefined>(undefined);
+  const longPressRef = useRef<GestureType | undefined>(undefined);
+  // Rate to restore to when the hold-to-2x press ends; also guards against
+  // restoring a rate the long press never actually changed (e.g. it was
+  // cancelled before activating).
+  const holdSpeedActiveRef = useRef(false);
+  const previousRateRef = useRef(1);
   // Anchor position captured at drag start (shared value = gesture-callback safe).
   const dragStart = useSharedValue(0);
   // Vertical-drag scratch: live value being adjusted, side (0 = volume/right,
@@ -342,10 +352,37 @@ export function VideoControls({
         );
       });
 
+    // Press and hold anywhere on the video to fast-forward playback at
+    // HOLD_SPEED_RATE; releasing restores whatever rate was active before
+    // (so it plays nicely with a rate already picked in the speed sheet).
+    const longPress = Gesture.LongPress()
+      // eslint-disable-next-line react-hooks/refs
+      .withRef(longPressRef)
+      .minDuration(HOLD_SPEED_DELAY)
+      .maxDistance(30)
+      .runOnJS(true)
+      .onStart(() => {
+        previousRateRef.current = player.playbackRate;
+        holdSpeedActiveRef.current = true;
+        // eslint-disable-next-line react-hooks/immutability
+        player.playbackRate = HOLD_SPEED_RATE;
+        setHoldSpeedActive(true);
+      })
+      // Always runs (success, cancel, or failure after activation) — guarantees
+      // the rate is restored even if the touch is interrupted mid-hold.
+      .onFinalize(() => {
+        if (!holdSpeedActiveRef.current) return;
+        holdSpeedActiveRef.current = false;
+        // eslint-disable-next-line react-hooks/immutability
+        player.playbackRate = previousRateRef.current;
+        setHoldSpeedActive(false);
+      });
+
     return Gesture.Race(
       pinch,
       drag,
       verticalDrag,
+      longPress,
       Gesture.Exclusive(doubleTap, singleTap),
     );
     // dragStart/vStart/vSide/zoom are stable shared values; safe to omit from deps.
@@ -431,6 +468,24 @@ export function VideoControls({
             </View>
             <ThemedText className="text-xs font-semibold text-white">
               {Math.round(verticalFeedback.value * 100)}%
+            </ThemedText>
+          </View>
+        </Animated.View>
+      )}
+
+      {/* Hold-to-2x speed indicator. */}
+      {holdSpeedActive && (
+        <Animated.View
+          entering={FadeIn.duration(120)}
+          exiting={FadeOut.duration(200)}
+          pointerEvents="none"
+          className="items-center"
+          style={{ position: "absolute", top: insets.top + 24, left: 0, right: 0 }}
+        >
+          <View className="flex-row items-center gap-1.5 rounded-full bg-black/65 px-4 py-2">
+            <Icon name="speed" size={16} color="#ffffff" />
+            <ThemedText className="text-sm font-semibold text-white">
+              {HOLD_SPEED_RATE}x speed
             </ThemedText>
           </View>
         </Animated.View>
@@ -535,7 +590,12 @@ export function VideoControls({
                 progress={progress}
                 onSeek={seekToFraction}
                 onScrubbingChange={setScrubbing}
-                blockGestures={[singleTapRef, doubleTapRef, dragRef]}
+                blockGestures={[
+                  singleTapRef,
+                  doubleTapRef,
+                  dragRef,
+                  longPressRef,
+                ]}
               />
               <View className="mt-1 flex-row justify-between">
                 <ThemedText className="text-xs font-medium text-white">

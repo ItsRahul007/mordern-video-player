@@ -52,6 +52,7 @@ const ICONS = {
   paste: { ios: 'doc.on.clipboard', android: 'content_paste', web: 'content_paste' },
   playCircle: { ios: 'play.circle.fill', android: 'play_circle', web: 'play_circle' },
   image: { ios: 'photo', android: 'image', web: 'image' },
+  speed: { ios: 'speedometer', android: 'speed', web: 'speed' },
   terabox: { ios: 'shippingbox.fill', android: 'cloud_download', web: 'cloud_download' },
 } as const;
 
