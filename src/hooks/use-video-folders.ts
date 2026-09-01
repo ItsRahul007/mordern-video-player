@@ -5,7 +5,7 @@ import { getFolderVideos, getVideoFolders } from '@/lib/media';
 export const videoKeys = {
   folders: ['video-folders'] as const,
   folder: (albumId: string) => ['folder-videos', albumId] as const,
-  thumbnail: (uri: string) => ['video-thumbnail', uri] as const,
+  thumbnail: (id: string) => ['video-thumbnail', id] as const,
 };
 
 /** All folders on the device that contain videos. */

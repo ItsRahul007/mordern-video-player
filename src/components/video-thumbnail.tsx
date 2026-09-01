@@ -25,13 +25,13 @@ function gradientFor(key: string): [string, string] {
 type VideoThumbnailProps = {
   /** Video URI to generate a still frame from. */
   uri: string | null | undefined;
-  /** Stable key (e.g. asset/album id) for the fallback gradient. */
+  /** Stable key (e.g. asset/album id) for the fallback gradient and thumbnail disk cache. */
   seed: string;
 };
 
 export function VideoThumbnail({ uri, seed }: VideoThumbnailProps) {
   const colors = gradientFor(seed);
-  const { data: thumbnail } = useVideoThumbnail(uri);
+  const { data: thumbnail } = useVideoThumbnail(uri, seed);
 
   return (
     <View className="h-full w-full items-center justify-center">

@@ -5,14 +5,15 @@
  * milliseconds; we normalize to seconds here.
  * https://docs.expo.dev/versions/v56.0.0/sdk/media-library/
  */
-import { File } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import {
   deleteAsync,
   getInfoAsync,
   readDirectoryAsync,
 } from "expo-file-system/legacy";
 import { Album, Asset, AssetField, MediaType, Query } from "expo-media-library";
-import { createVideoPlayer, type VideoThumbnail } from "expo-video";
+import { createVideoPlayer } from "expo-video";
+import * as VideoThumbnails from "expo-video-thumbnails";
 
 import { fileUriToPath, shareFiles } from "@modules/share-files";
 
@@ -314,10 +315,11 @@ export async function deleteFolders(ids: string[]): Promise<void> {
 }
 
 /**
- * Simple serial queue – ensures only one native video player/decoder is ever
- * allocated at a time, across both duration probing and thumbnail generation.
- * This prevents OOM crashes on low-RAM devices when a folder has many
- * (especially large) videos and several rows try to spin up players at once.
+ * Simple serial queue – ensures only one native decoder (video player or
+ * thumbnail extractor) is ever active at a time, across both duration probing
+ * and thumbnail generation. This prevents OOM crashes on low-RAM devices when
+ * a folder has many (especially large) videos and several rows try to decode
+ * frames at once.
  */
 let _videoPlayerQueue: Promise<unknown> = Promise.resolve();
 
@@ -376,24 +378,47 @@ export function getVideoDuration(
   });
 }
 
+function thumbnailCacheDir(): Directory {
+  const dir = new Directory(Paths.cache, "thumbnails");
+  if (!dir.exists) dir.create();
+  return dir;
+}
+
+// Asset ids can contain path-unsafe characters (e.g. iOS PHAsset local
+// identifiers contain "/"), so sanitize before using one as a filename.
+function sanitizeCacheKey(key: string): string {
+  return key.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
 /**
- * Generate a single still frame for a video. Returns a native image reference
- * that expo-image can render directly. The temporary player is released after.
+ * Generate (or reuse) a disk-cached still frame for a video. Thumbnails are
+ * persisted under the cache directory keyed by the media-library asset id, so
+ * once a video has been thumbnailed once, later visits (including after a
+ * cold app start) read the file straight off disk instead of re-decoding it.
+ *
+ * Generation itself is serialized through the shared queue below to bound
+ * memory use when many videos need a thumbnail at once; disk cache hits skip
+ * the queue entirely.
  */
-export function generateVideoThumbnail(
+export async function generateVideoThumbnail(
   uri: string,
-): Promise<VideoThumbnail | null> {
+  cacheKey: string,
+): Promise<{ uri: string } | null> {
+  const cached = new File(thumbnailCacheDir(), `${sanitizeCacheKey(cacheKey)}.jpg`);
+  if (cached.exists) return { uri: cached.uri };
+
   return enqueue(async () => {
-    const player = createVideoPlayer(uri);
+    if (cached.exists) return { uri: cached.uri };
     try {
-      const thumbnails = await player.generateThumbnailsAsync([0.1], {
-        maxWidth: 640,
+      const result = await VideoThumbnails.getThumbnailAsync(uri, {
+        time: 100,
+        quality: 0.7,
       });
-      return thumbnails[0] ?? null;
+      const generated = new File(result.uri);
+      await generated.copy(cached);
+      return { uri: cached.uri };
     } catch {
       return null;
-    } finally {
-      player.release();
     }
   });
 }
