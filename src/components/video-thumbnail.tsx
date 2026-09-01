@@ -3,6 +3,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { StyleSheet, View } from "react-native";
 
 import { Icon } from "@/components/icon";
+import { useVideoThumbnail } from "@/hooks/use-video-thumbnail";
 
 // Deterministic gradient per key so placeholders look lively before/without a frame.
 const GRADIENTS: [string, string][] = [
@@ -30,6 +31,7 @@ type VideoThumbnailProps = {
 
 export function VideoThumbnail({ uri, seed }: VideoThumbnailProps) {
   const colors = gradientFor(seed);
+  const { data: thumbnail } = useVideoThumbnail(uri);
 
   return (
     <View className="h-full w-full items-center justify-center">
@@ -39,9 +41,9 @@ export function VideoThumbnail({ uri, seed }: VideoThumbnailProps) {
         end={{ x: 1, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {uri ? (
+      {thumbnail ? (
         <Image
-          source={uri}
+          source={thumbnail}
           style={StyleSheet.absoluteFill}
           contentFit="cover"
           transition={200}

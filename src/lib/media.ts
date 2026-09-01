@@ -314,17 +314,17 @@ export async function deleteFolders(ids: string[]): Promise<void> {
 }
 
 /**
- * Simple serial queue – ensures only one duration probe runs at a time so we
- * never allocate more than one native video player/decoder simultaneously.
- * This prevents OOM crashes on low-RAM devices when a playlist has many videos
- * whose media-library metadata reports duration = 0.
+ * Simple serial queue – ensures only one native video player/decoder is ever
+ * allocated at a time, across both duration probing and thumbnail generation.
+ * This prevents OOM crashes on low-RAM devices when a folder has many
+ * (especially large) videos and several rows try to spin up players at once.
  */
-let _durationQueue: Promise<unknown> = Promise.resolve();
+let _videoPlayerQueue: Promise<unknown> = Promise.resolve();
 
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  const task = _durationQueue.then(fn, fn);
+  const task = _videoPlayerQueue.then(fn, fn);
   // Keep the chain going regardless of success/failure.
-  _durationQueue = task.then(
+  _videoPlayerQueue = task.then(
     () => {},
     () => {},
   );
@@ -380,18 +380,20 @@ export function getVideoDuration(
  * Generate a single still frame for a video. Returns a native image reference
  * that expo-image can render directly. The temporary player is released after.
  */
-export async function generateVideoThumbnail(
+export function generateVideoThumbnail(
   uri: string,
 ): Promise<VideoThumbnail | null> {
-  const player = createVideoPlayer(uri);
-  try {
-    const thumbnails = await player.generateThumbnailsAsync([0.1], {
-      maxWidth: 640,
-    });
-    return thumbnails[0] ?? null;
-  } catch {
-    return null;
-  } finally {
-    player.release();
-  }
+  return enqueue(async () => {
+    const player = createVideoPlayer(uri);
+    try {
+      const thumbnails = await player.generateThumbnailsAsync([0.1], {
+        maxWidth: 640,
+      });
+      return thumbnails[0] ?? null;
+    } catch {
+      return null;
+    } finally {
+      player.release();
+    }
+  });
 }
