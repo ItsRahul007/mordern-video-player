@@ -29,7 +29,12 @@ function RootNavigator() {
   return (
     <NavigationThemeProvider value={scheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="index" />
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="album/[id]" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen
+          name="viewer"
+          options={{ animation: 'fade', presentation: 'fullScreenModal' }}
+        />
         <Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="instagram" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="terabox" options={{ animation: 'slide_from_right' }} />

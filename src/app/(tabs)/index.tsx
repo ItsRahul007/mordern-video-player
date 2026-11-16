@@ -16,6 +16,7 @@ import { ConfirmSheet } from "@/components/confirm-sheet";
 import { FolderCard } from "@/components/folder-card";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
+import { usePrefetchGallery } from "@/hooks/use-gallery";
 import { useMediaPermissions } from "@/hooks/use-permissions";
 import { useSelection } from "@/hooks/use-selection";
 import { useTheme } from "@/hooks/use-theme";
@@ -27,6 +28,8 @@ export default function FoldersScreen() {
   const queryClient = useQueryClient();
   const { colors } = useTheme();
   const { granted, requestPermission } = useMediaPermissions();
+  // Load the Gallery tab's data in the background so it opens instantly.
+  usePrefetchGallery(granted);
   const {
     data: folders,
     isLoading,
