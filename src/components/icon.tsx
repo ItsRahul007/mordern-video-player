@@ -54,6 +54,10 @@ const ICONS = {
   image: { ios: 'photo', android: 'image', web: 'image' },
   speed: { ios: 'speedometer', android: 'speed', web: 'speed' },
   terabox: { ios: 'shippingbox.fill', android: 'cloud_download', web: 'cloud_download' },
+  home: { ios: 'house.fill', android: 'home', web: 'home' },
+  gallery: { ios: 'photo.on.rectangle.angled', android: 'photo_library', web: 'photo_library' },
+  albums: { ios: 'rectangle.stack.fill', android: 'photo_album', web: 'photo_album' },
+  info: { ios: 'info.circle', android: 'info', web: 'info' },
 } as const;
 
 export type IconName = keyof typeof ICONS | keyof typeof BRAND_ICONS;
