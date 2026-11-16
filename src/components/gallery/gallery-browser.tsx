@@ -65,6 +65,8 @@ export function FilterChips({
 type GalleryBrowserProps = {
   albumId?: string;
   enabled: boolean;
+  /** Show the loading skeleton even before querying (e.g. permission still being checked). */
+  loading?: boolean;
   /** Normal (non-selection) header above the chips. */
   renderHeader: () => ReactNode;
   emptyText?: string;
@@ -77,6 +79,7 @@ type GalleryBrowserProps = {
 export function GalleryBrowser({
   albumId,
   enabled,
+  loading = false,
   renderHeader,
   emptyText = "No photos or videos here yet.",
 }: GalleryBrowserProps) {
@@ -200,7 +203,7 @@ export function GalleryBrowser({
       {header}
       <MediaGrid
         items={items}
-        isLoading={isLoading}
+        isLoading={isLoading || loading}
         isRefreshing={isRefetching && !isFetchingNextPage}
         isFetchingMore={isFetchingNextPage}
         onRefresh={refetch}

@@ -1,16 +1,17 @@
 import { useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import {
-  ActivityIndicator,
   FlatList,
   Pressable,
   RefreshControl,
   useWindowDimensions,
   View,
 } from "react-native";
+import type { SharedValue } from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { AlbumCard } from "@/components/gallery/album-card";
+import { SkeletonBlock, useSkeletonClock } from "@/components/gallery/skeleton";
 import { GalleryBrowser } from "@/components/gallery/gallery-browser";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
@@ -61,11 +62,50 @@ function SegmentedControl({
   );
 }
 
+/** Placeholder album cards (cover + title + count), same size as the real ones. */
+function AlbumsSkeleton({
+  cardWidth,
+  gap,
+  clock,
+}: {
+  cardWidth: number;
+  gap: number;
+  clock: SharedValue<number>;
+}) {
+  return (
+    <View className="flex-row flex-wrap px-4" style={{ columnGap: gap, rowGap: 18 }}>
+      {Array.from({ length: 6 }, (_, i) => {
+        const phase = Math.floor(i / 2) * 0.15;
+        return (
+          <View key={i} style={{ width: cardWidth }}>
+            <SkeletonBlock
+              clock={clock}
+              phase={phase}
+              style={{ width: cardWidth, height: cardWidth, borderRadius: 16 }}
+            />
+            <SkeletonBlock
+              clock={clock}
+              phase={phase + 0.05}
+              style={{ width: cardWidth * 0.6, height: 12, borderRadius: 6, marginTop: 10 }}
+            />
+            <SkeletonBlock
+              clock={clock}
+              phase={phase + 0.08}
+              style={{ width: cardWidth * 0.4, height: 10, borderRadius: 5, marginTop: 6 }}
+            />
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function AlbumsView({ header }: { header: React.ReactNode }) {
   const router = useRouter();
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
   const { data: albums, isLoading, isRefetching, refetch } = useGalleryAlbums();
+  const clock = useSkeletonClock();
   const gap = 14;
   const cardWidth = Math.floor((width - 16 * 2 - gap) / 2);
 
@@ -99,9 +139,7 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
         }
         ListEmptyComponent={
           isLoading ? (
-            <View className="mt-24 items-center">
-              <ActivityIndicator color={colors.textSecondary} />
-            </View>
+            <AlbumsSkeleton cardWidth={cardWidth} gap={gap} clock={clock} />
           ) : (
             <View className="mt-24 items-center px-8">
               <ThemedText type="muted">No albums found.</ThemedText>
@@ -115,18 +153,21 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
 
 export default function GalleryScreen() {
   const { colors } = useTheme();
-  const { granted, requestPermission } = useMediaPermissions();
+  const { permission, granted, requestPermission } = useMediaPermissions();
+  // On a cold start the permission is unknown for a moment — that's loading,
+  // not "denied", so don't flash the grant-access screen.
+  const checking = permission == null;
   const [segment, setSegment] = useState<Segment>("photos");
   useGalleryLibrarySync(granted);
 
   const titleRow = (
     <View className="flex-row items-center justify-between px-4 pb-3 pt-2">
       <ThemedText type="title">Gallery</ThemedText>
-      {granted && <SegmentedControl value={segment} onChange={setSegment} />}
+      {(granted || checking) && <SegmentedControl value={segment} onChange={setSegment} />}
     </View>
   );
 
-  if (!granted) {
+  if (!granted && !checking) {
     return (
       <SafeAreaView className="flex-1" style={{ backgroundColor: colors.background }} edges={["top"]}>
         {titleRow}
@@ -153,7 +194,7 @@ export default function GalleryScreen() {
   return (
     <SafeAreaView className="flex-1" style={{ backgroundColor: colors.background }} edges={["top"]}>
       {segment === "photos" ? (
-        <GalleryBrowser enabled={granted} renderHeader={() => titleRow} />
+        <GalleryBrowser enabled={granted} loading={checking} renderHeader={() => titleRow} />
       ) : (
         <AlbumsView header={titleRow} />
       )}

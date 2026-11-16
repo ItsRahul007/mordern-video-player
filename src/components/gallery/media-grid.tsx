@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   RefreshControl,
   useWindowDimensions,
   View,
@@ -22,6 +21,7 @@ import Animated, {
 import { scheduleOnRN } from "react-native-worklets";
 
 import { MediaThumb } from "@/components/gallery/media-tile";
+import { SkeletonBlock, useSkeletonClock } from "@/components/gallery/skeleton";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { useTheme } from "@/hooks/use-theme";
@@ -29,6 +29,10 @@ import { formatDuration } from "@/lib/format";
 import { buildTimeline, type GalleryItem, type TimelineGrouping } from "@/lib/gallery";
 
 const GAP = 2;
+/** Space under the last row. */
+const BOTTOM_PADDING = 24;
+/** Placeholder rows shown at the bottom while the next page loads. */
+const FOOTER_ROWS = 2;
 const MONTH_HEADER_HEIGHT = 48;
 const GROUP_HEADER_HEIGHT = 34;
 
@@ -118,7 +122,7 @@ function computeLevel(items: GalleryItem[], columns: number, width: number): Lev
       cursor += row.kind === "month" ? MONTH_HEADER_HEIGHT : GROUP_HEADER_HEIGHT;
     }
   }
-  return { columns, tileSize, x, y, headers, height: cursor + 24 };
+  return { columns, tileSize, x, y, headers, height: cursor + BOTTOM_PADDING };
 }
 
 /** First index whose y is ≥ `value` (y is non-decreasing by index). */
@@ -198,6 +202,7 @@ export function MediaGrid({
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
   const scrollRef = useAnimatedRef<Animated.ScrollView>();
+  const skeletonClock = useSkeletonClock();
 
   // Layouts for every zoom level (cheap: one pass over the items each).
   const layouts = useMemo(
@@ -767,9 +772,11 @@ export function MediaGrid({
     return (
       <View className="flex-1">
         {isLoading ? (
-          <View className="mt-24 items-center">
-            <ActivityIndicator color={colors.textSecondary} />
-          </View>
+          <GridSkeleton
+            columns={layout.columns}
+            tileSize={layout.tileSize}
+            clock={skeletonClock}
+          />
         ) : (
           <View className="mt-24 items-center px-8">
             <ThemedText type="muted" className="text-center">
@@ -803,7 +810,11 @@ export function MediaGrid({
               />
             }
           >
-            <View style={{ height: contentHeight + (isFetchingMore ? 60 : 0) }}>
+            <View
+              style={{
+                height: contentHeight + (isFetchingMore ? FOOTER_ROWS * (layout.tileSize + GAP) : 0),
+              }}
+            >
               {activeLevels.map((l) => (
                 <LevelHeaders
                   key={`headers-${l}`}
@@ -835,11 +846,20 @@ export function MediaGrid({
                 />
               ))}
               {isFetchingMore && (
+                // Next page on its way: placeholder rows at the current tile size.
                 <View
-                  className="absolute left-0 right-0 items-center"
-                  style={{ top: contentHeight }}
+                  className="absolute left-0 right-0"
+                  style={{ top: layout.height - BOTTOM_PADDING }}
                 >
-                  <ActivityIndicator color={colors.textSecondary} />
+                  {Array.from({ length: FOOTER_ROWS }, (_, r) => (
+                    <SkeletonRow
+                      key={r}
+                      columns={layout.columns}
+                      tileSize={layout.tileSize}
+                      clock={skeletonClock}
+                      phase={r * 0.12}
+                    />
+                  ))}
                 </View>
               )}
             </View>
@@ -1098,6 +1118,114 @@ function GroupCheck({ state, accent }: { state: CheckState; accent: string }) {
     >
       {state === "all" && <Icon name="check" size={13} color="#ffffff" />}
       {state === "some" && <View className="h-[2px] w-[10px] rounded-full bg-white" />}
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Skeletons — laid out exactly like the real grid at the current zoom level.
+
+function SkeletonRow({
+  columns,
+  tileSize,
+  clock,
+  phase,
+}: {
+  columns: number;
+  tileSize: number;
+  clock: SharedValue<number>;
+  phase: number;
+}) {
+  return (
+    <View className="flex-row" style={{ gap: GAP, marginBottom: GAP }}>
+      {Array.from({ length: columns }, (_, c) => (
+        <SkeletonBlock
+          key={c}
+          clock={clock}
+          // A slight left-to-right lag inside the row, on top of the row's own.
+          phase={phase + c * 0.015}
+          style={{ width: tileSize, height: tileSize }}
+        />
+      ))}
+    </View>
+  );
+}
+
+/**
+ * First-load placeholder: month and day/week labels with rows of tiles, using
+ * the same column count, tile size and grouping as the grid will have — so
+ * nothing jumps when the photos arrive. Rows are phase-shifted so the pulse
+ * travels down the screen as a wave.
+ */
+function GridSkeleton({
+  columns,
+  tileSize,
+  clock,
+}: {
+  columns: number;
+  tileSize: number;
+  clock: SharedValue<number>;
+}) {
+  const grouping = groupingFor(columns);
+  const screen = 1400; // enough to fill any phone screen
+  const rowH = tileSize + GAP;
+  // A believable mix of short and long groups.
+  const groupRows = [1, 2, 1, 3, 2];
+  const blocks: React.ReactNode[] = [];
+  let y = 0;
+  let row = 0;
+  let g = 0;
+  const label = (key: string, width: number, height: number, top: number) => (
+    <SkeletonBlock
+      key={key}
+      clock={clock}
+      phase={(top / rowH) * 0.12}
+      style={{ width, height, borderRadius: height / 2 }}
+    />
+  );
+
+  // Month label.
+  blocks.push(
+    <View
+      key="month"
+      className="flex-row items-center justify-between px-4"
+      style={{ height: MONTH_HEADER_HEIGHT }}
+    >
+      {label("m-title", 110, 16, y)}
+      {label("m-count", 24, 10, y)}
+    </View>,
+  );
+  y += MONTH_HEADER_HEIGHT;
+
+  while (y < screen) {
+    if (grouping !== "month") {
+      blocks.push(
+        <View key={`g-${g}`} className="justify-center px-4" style={{ height: GROUP_HEADER_HEIGHT }}>
+          {label(`g-${g}-t`, grouping === "day" ? 92 : 78, 11, y)}
+        </View>,
+      );
+      y += GROUP_HEADER_HEIGHT;
+    }
+    const rows = grouping === "month" ? Math.ceil((screen - y) / rowH) : groupRows[g % groupRows.length];
+    for (let r = 0; r < rows && y < screen; r++) {
+      blocks.push(
+        <SkeletonRow
+          key={`r-${row}`}
+          columns={columns}
+          tileSize={tileSize}
+          clock={clock}
+          phase={(y / rowH) * 0.12}
+        />,
+      );
+      y += rowH;
+      row++;
+    }
+    g++;
+  }
+
+  return (
+    <View className="flex-1 overflow-hidden" pointerEvents="none">
+      {blocks}
     </View>
   );
 }
