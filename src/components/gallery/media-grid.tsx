@@ -1,34 +1,30 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  FlatList,
-  Pressable,
   RefreshControl,
   useWindowDimensions,
   View,
-  type GestureResponderEvent,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
+  type LayoutChangeEvent,
 } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
+  scrollTo,
+  useAnimatedReaction,
+  useAnimatedRef,
+  useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
-  withSpring,
   withTiming,
+  type SharedValue,
 } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
 
-import { MediaThumb, MediaTile } from "@/components/gallery/media-tile";
+import { MediaThumb } from "@/components/gallery/media-tile";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { useTheme } from "@/hooks/use-theme";
-import {
-  buildTimeline,
-  type GalleryItem,
-  type TimelineGrouping,
-  type TimelineRow,
-} from "@/lib/gallery";
+import { formatDuration } from "@/lib/format";
+import { buildTimeline, type GalleryItem, type TimelineGrouping } from "@/lib/gallery";
 
 const GAP = 2;
 const MONTH_HEADER_HEIGHT = 48;
@@ -36,6 +32,7 @@ const GROUP_HEADER_HEIGHT = 34;
 
 /** Columns per row at each zoom step: 3 (most zoomed in) … 15 (most zoomed out). */
 export const GRID_ZOOM_LEVELS = [3, 4, 5, 7, 9, 12, 15] as const;
+const LAST_LEVEL = GRID_ZOOM_LEVELS.length - 1;
 
 /** Sub-grouping under each month, by density: days → weeks → months only. */
 function groupingFor(columns: number): TimelineGrouping {
@@ -44,75 +41,92 @@ function groupingFor(columns: number): TimelineGrouping {
   return "month";
 }
 
-/** Above this many columns tiles are tiny: no duration text, one hit target per row. */
-const COMPACT_FROM = 7;
+/** Release past this much of a transition completes it; otherwise it springs back. */
+const COMMIT_AT = 0.4;
+const SETTLE_MS = 200;
 
-/** Visual scale limits while pinching (the grid follows the fingers within these). */
-const MIN_VISUAL = 0.35;
-const MAX_VISUAL = 2.5;
-const SPRING = { damping: 22, stiffness: 240, mass: 0.6 };
+// ---------------------------------------------------------------------------
+// Layout: absolute position of every tile and header at one zoom level.
 
-/**
- * Pick the zoom level after a pinch: the level whose column count best
- * matches what the fingers asked for (columns ÷ scale). Any deliberate pinch
- * moves at least one step.
- */
-function targetLevel(level: number, scale: number): number {
-  const wanted = GRID_ZOOM_LEVELS[level] / scale;
-  let best = level;
-  let bestDist = Infinity;
-  GRID_ZOOM_LEVELS.forEach((cols, i) => {
-    const dist = Math.abs(Math.log(cols / wanted));
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = i;
-    }
-  });
-  if (best === level) {
-    if (scale < 0.88) best = level + 1;
-    else if (scale > 1.14) best = level - 1;
-  }
-  return Math.min(GRID_ZOOM_LEVELS.length - 1, Math.max(0, best));
-}
-
-type Layout = {
-  columns: number;
-  rows: TimelineRow[];
-  /** offsets[i] = top of row i; offsets[rows.length] = content height. */
-  offsets: number[];
-  tileSize: number;
-  rowHeight: number;
+type Header = {
+  key: string;
+  kind: "month" | "group";
+  title: string;
+  count: number;
+  y: number;
 };
 
-function computeLayout(items: GalleryItem[], columns: number, width: number): Layout {
-  const rows = buildTimeline(items, columns, groupingFor(columns));
+type LevelLayout = {
+  columns: number;
+  tileSize: number;
+  /** Per item index (same order as `items`). */
+  x: number[];
+  y: number[];
+  headers: Header[];
+  height: number;
+};
+
+function computeLevel(items: GalleryItem[], columns: number, width: number): LevelLayout {
   const tileSize = (width - GAP * (columns - 1)) / columns;
-  const rowHeight = tileSize + GAP;
-  const offsets = new Array<number>(rows.length + 1);
-  offsets[0] = 0;
-  rows.forEach((row, i) => {
-    const h =
-      row.kind === "month"
-        ? MONTH_HEADER_HEIGHT
-        : row.kind === "group"
-          ? GROUP_HEADER_HEIGHT
-          : rowHeight;
-    offsets[i + 1] = offsets[i] + h;
-  });
-  return { columns, rows, offsets, tileSize, rowHeight };
+  const x = new Array<number>(items.length);
+  const y = new Array<number>(items.length);
+  const headers: Header[] = [];
+  let cursor = 0;
+  for (const row of buildTimeline(items, columns, groupingFor(columns))) {
+    if (row.kind === "row") {
+      row.items.forEach((_, c) => {
+        x[row.startIndex + c] = c * (tileSize + GAP);
+        y[row.startIndex + c] = cursor;
+      });
+      cursor += tileSize + GAP;
+    } else {
+      headers.push({ key: row.key, kind: row.kind, title: row.title, count: row.count, y: cursor });
+      cursor += row.kind === "month" ? MONTH_HEADER_HEIGHT : GROUP_HEADER_HEIGHT;
+    }
+  }
+  return { columns, tileSize, x, y, headers, height: cursor + 24 };
 }
 
-/** Index of the row containing content offset `y` (binary search). */
-function rowAt(offsets: number[], y: number): number {
+/** First index whose y is ≥ `value` (y is non-decreasing by index). */
+function lowerBound(ys: number[], value: number): number {
   let lo = 0;
-  let hi = offsets.length - 2;
+  let hi = ys.length;
   while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (offsets[mid] <= y) lo = mid;
-    else hi = mid - 1;
+    const mid = (lo + hi) >> 1;
+    if (ys[mid] < value) lo = mid + 1;
+    else hi = mid;
   }
-  return Math.max(0, lo);
+  return lo;
 }
+
+/** Index range [start, end) of tiles overlapping content band [top, bottom]. */
+function rangeFor(layout: LevelLayout, top: number, bottom: number): [number, number] {
+  const start = lowerBound(layout.y, top - layout.tileSize);
+  const end = lowerBound(layout.y, bottom + 1);
+  return [start, end];
+}
+
+/** Worklet: tile index at content point (x, y) for a level, or -1. */
+function hitTest(xs: number[], ys: number[], size: number, px: number, py: number): number {
+  "worklet";
+  // Binary search for the first tile whose row reaches py.
+  let lo = 0;
+  let hi = ys.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (ys[mid] + size < py) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo >= ys.length) return -1;
+  const rowY = ys[lo];
+  if (py < rowY) return lo; // in a header gap: use the next tile
+  for (let i = lo; i < ys.length && ys[i] === rowY; i++) {
+    if (px >= xs[i] && px < xs[i] + size) return i;
+  }
+  return lo;
+}
+
+// ---------------------------------------------------------------------------
 
 type MediaGridProps = {
   items: GalleryItem[];
@@ -128,12 +142,11 @@ type MediaGridProps = {
 };
 
 /**
- * Timeline grid with sticky month headers and day/week sub-headers.
- *
- * Pinch zoom works like a photos app: while the fingers move, the grid just
- * scales under them (a UI-thread transform — no React work), and on release
- * it switches to the closest column count once, keeping the photo under the
- * fingers in place, then settles from the pinched size.
+ * Timeline grid that reflows live while you pinch: every tile slides and
+ * resizes from its place at the current column count to its place at the
+ * next one, driven frame-by-frame by the fingers (UI thread). Keep pinching
+ * to walk through several levels in one gesture; release completes or
+ * springs back. The photo under the fingers stays under them throughout.
  */
 export function MediaGrid({
   items,
@@ -149,260 +162,328 @@ export function MediaGrid({
 }: MediaGridProps) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
-  const listRef = useRef<FlatList<TimelineRow>>(null);
+  const scrollRef = useAnimatedRef<Animated.ScrollView>();
 
-  // Default is the most zoomed-in level (3 per row).
-  const [zoomLevel, setZoomLevel] = useState(0);
-  const layout = useMemo(
-    () => computeLayout(items, GRID_ZOOM_LEVELS[zoomLevel], width),
-    [items, zoomLevel, width],
+  // Layouts for every zoom level (cheap: one pass over the items each).
+  const layouts = useMemo(
+    () => GRID_ZOOM_LEVELS.map((cols) => computeLevel(items, cols, width)),
+    [items, width],
   );
-  const { rows, offsets, tileSize, rowHeight, columns } = layout;
-  const compact = columns >= COMPACT_FROM;
+  // The positional data, copied to the UI thread for the tile animations.
+  // Set in an effect (not derived) so every mounted tile's animated style is
+  // re-evaluated as soon as new positions land; the version also tells the
+  // scroll reaction to refresh which tiles are mounted.
+  const geometry = useSharedValue<{ x: number[]; y: number[]; s: number }[]>([]);
+  const geometryVersion = useSharedValue(0);
+  useEffect(() => {
+    geometry.set(layouts.map((l) => ({ x: l.x, y: l.y, s: l.tileSize })));
+    geometryVersion.set(geometryVersion.get() + 1);
+  }, [layouts, geometry, geometryVersion]);
 
-  const getItemLayout = useCallback(
-    (_: ArrayLike<TimelineRow> | null | undefined, index: number) => ({
-      length: offsets[index + 1] - offsets[index],
-      offset: offsets[index],
-      index,
-    }),
-    [offsets],
-  );
+  // Committed zoom level (JS) — default is the most zoomed in (3 per row).
+  const [level, setLevel] = useState(0);
+  const layout = layouts[level];
 
-  const stickyIndices = useMemo(
-    () => rows.flatMap((row, i) => (row.kind === "month" ? [i] : [])),
-    [rows],
-  );
+  // Transition state (UI thread): tiles sit at lerp(from, to, progress).
+  const fromLevel = useSharedValue(0);
+  const toLevel = useSharedValue(0);
+  const progress = useSharedValue(0);
+  const transitioning = useSharedValue(false);
 
-  // --- Scroll tracking (for anchoring) --------------------------------------
-  // Shared values (not refs) so the React Compiler accepts reading them from
-  // the pinch's end handler.
   const scrollY = useSharedValue(0);
-  const onScroll = useCallback(
-    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-      scrollY.set(e.nativeEvent.contentOffset.y);
-    },
-    [scrollY],
-  );
-
-  // --- Pinch ----------------------------------------------------------------
-  const [pinching, setPinching] = useState(false);
   const viewHeight = useSharedValue(0);
-  const visualScale = useSharedValue(1);
-  const focalX = useSharedValue(0);
-  const focalY = useSharedValue(0);
+  const [viewportH, setViewportH] = useState(0);
 
-  // Scroll offset to apply once the new layout has rendered.
-  const pendingScroll = useSharedValue<number | null>(null);
+  // Anchor: the tile under the fingers, and where on it they are.
+  const anchorIndex = useSharedValue(0);
+  const anchorRel = useSharedValue(0);
+  const anchorScreenY = useSharedValue(0);
 
-  const settle = useCallback(
-    (from: number) => {
-      visualScale.set(from);
-      visualScale.set(withSpring(1, SPRING));
+  // Which levels' headers are mounted (more than one mid-transition), and
+  // the mounted tile index range.
+  const [activeLevels, setActiveLevels] = useState<number[]>([0]);
+  // Start with roughly the first screen and a half mounted.
+  const [range, setRange] = useState<[number, number]>(() => rangeFor(layouts[0], 0, 1400));
+  const [pinching, setPinching] = useState(false);
+
+  // --- Mounted range --------------------------------------------------------
+  const computeRange = useCallback(
+    (levels: number[], anchor: number | null, screenY: number, rel: number) => {
+      const h = viewHeight.get() || 900;
+      let start = Number.MAX_SAFE_INTEGER;
+      let end = 0;
+      for (const l of levels) {
+        const lay = layouts[l];
+        // Scroll position this level will have (anchored), or the current one.
+        const top =
+          anchor != null && lay.y[anchor] !== undefined
+            ? lay.y[anchor] + rel * lay.tileSize - screenY
+            : scrollY.get();
+        const buffer = levels.length > 1 ? 0 : h * 0.5;
+        const [s, e] = rangeFor(lay, top - buffer, top + h + buffer);
+        start = Math.min(start, s);
+        end = Math.max(end, e);
+      }
+      return [Math.min(start, end), end] as [number, number];
     },
-    [visualScale],
+    [layouts, scrollY, viewHeight],
   );
 
-  const commitPinch = useCallback(
-    (scale: number, fx: number, fy: number) => {
-      setPinching(false);
-      const next = targetLevel(zoomLevel, scale);
-      if (next === zoomLevel) {
-        settle(scale);
-        return;
-      }
-      // Cheap (one pass over the items); computed here so the scroll target
-      // is known before the new layout renders.
-      const nextLayout = computeLayout(items, GRID_ZOOM_LEVELS[next], width);
+  const refreshRestingRange = useCallback(() => {
+    const next = computeRange([level], null, 0, 0);
+    setRange((prev) => (prev[0] === next[0] && prev[1] === next[1] ? prev : next));
+    if (next[1] >= items.length - layout.columns * 4) onEndReached();
+  }, [computeRange, level, items.length, layout.columns, onEndReached]);
 
-      // The photo under the fingers, and where in its row they were.
-      const contentY = scrollY.get() + fy;
-      let r = rowAt(offsets, contentY);
-      while (r < rows.length && rows[r].kind !== "row") r++;
-      const row = rows[r];
-      if (row && row.kind === "row") {
-        const col = Math.min(row.items.length - 1, Math.floor(fx / (tileSize + GAP)));
-        const itemIndex = row.startIndex + Math.max(0, col);
-        const within = Math.min(1, Math.max(0, (contentY - offsets[r]) / rowHeight));
-        const nr = nextLayout.rows.findIndex(
-          (x) =>
-            x.kind === "row" &&
-            itemIndex >= x.startIndex &&
-            itemIndex < x.startIndex + x.items.length,
+  // Re-evaluate the mounted range every quarter screen of scrolling, and
+  // whenever the layouts change (new page loaded, rotation).
+  useAnimatedReaction(
+    () =>
+      Math.floor(scrollY.get() / Math.max(1, viewHeight.get() * 0.25)) * 100000 +
+      geometryVersion.get(),
+    (key, prev) => {
+      if (key !== prev && !transitioning.get()) scheduleOnRN(refreshRestingRange);
+    },
+  );
+
+  // --- Pinch transition -------------------------------------------------------
+  const beginTransition = useCallback(
+    (anchor: number, screenY: number, rel: number) => {
+      setPinching(true);
+      const levels = [level - 1, level, level + 1].filter((l) => l >= 0 && l <= LAST_LEVEL);
+      setActiveLevels(levels);
+      setRange(computeRange(levels, anchor, screenY, rel));
+    },
+    [level, computeRange],
+  );
+
+  // Walked past a level mid-pinch: mount the next neighbour too.
+  const extendTransition = useCallback(
+    (newFrom: number) => {
+      const levels = [newFrom - 1, newFrom, newFrom + 1].filter(
+        (l) => l >= 0 && l <= LAST_LEVEL,
+      );
+      setActiveLevels((prev) => Array.from(new Set([...prev, ...levels])));
+      setRange((prev) => {
+        const [s, e] = computeRange(
+          levels,
+          anchorIndex.get(),
+          anchorScreenY.get(),
+          anchorRel.get(),
         );
-        if (nr >= 0) {
-          pendingScroll.set(
-            Math.max(0, nextLayout.offsets[nr] + within * nextLayout.rowHeight - fy),
-          );
-        }
-      }
-
-      // Start the new layout at the size the old tiles had under the fingers,
-      // then spring to rest — so the change reads as one continuous zoom.
-      settle((tileSize * scale) / nextLayout.tileSize);
-      setZoomLevel(next);
+        return [Math.min(prev[0], s), Math.max(prev[1], e)];
+      });
     },
-    [zoomLevel, items, width, offsets, rows, tileSize, rowHeight, settle, scrollY, pendingScroll],
+    [computeRange, anchorIndex, anchorScreenY, anchorRel],
   );
 
-  const onContentSizeChange = useCallback(() => {
-    const y = pendingScroll.get();
-    if (y == null) return;
-    pendingScroll.set(null);
-    listRef.current?.scrollToOffset({ offset: y, animated: false });
-  }, [pendingScroll]);
+  const finishTransition = useCallback(
+    (finalLevel: number) => {
+      setPinching(false);
+      setLevel(finalLevel);
+      setActiveLevels([finalLevel]);
+      const lay = layouts[finalLevel];
+      const h = viewHeight.get() || 900;
+      const top = scrollY.get();
+      setRange(rangeFor(lay, top - h * 0.5, top + h * 1.5));
+    },
+    [layouts, scrollY, viewHeight],
+  );
 
+  // Keep the anchor tile under the fingers as the layout changes.
+  useAnimatedReaction(
+    () =>
+      transitioning.get() ? progress.get() + fromLevel.get() * 10 + toLevel.get() * 100 : -1,
+    (key) => {
+      if (key < 0) return;
+      const g = geometry.get();
+      const a = g[fromLevel.get()];
+      const b = g[toLevel.get()];
+      const i = anchorIndex.get();
+      if (!a || !b || a.y[i] === undefined || b.y[i] === undefined) return;
+      const p = progress.get();
+      const size = a.s + (b.s - a.s) * p;
+      const tileY = a.y[i] + (b.y[i] - a.y[i]) * p;
+      const target = Math.max(0, tileY + anchorRel.get() * size - anchorScreenY.get());
+      scrollTo(scrollRef, 0, target, false);
+    },
+  );
+
+  const pinchBase = useSharedValue(1);
   const native = Gesture.Native();
+
   const pinch = Gesture.Pinch()
     .simultaneousWithExternalGesture(native)
     .onStart((e) => {
-      focalX.set(e.focalX);
-      focalY.set(e.focalY);
-      scheduleOnRN(setPinching, true);
+      const g = geometry.get();
+      const cur = g[fromLevel.get()];
+      if (!cur) return;
+      const cy = scrollY.get() + e.focalY;
+      const hit = hitTest(cur.x, cur.y, cur.s, e.focalX, cy);
+      if (hit < 0) return;
+      anchorIndex.set(hit);
+      anchorRel.set(Math.min(1, Math.max(0, (cy - cur.y[hit]) / cur.s)));
+      anchorScreenY.set(e.focalY);
+      pinchBase.set(e.scale);
+      toLevel.set(fromLevel.get());
+      progress.set(0);
+      transitioning.set(true);
+      scheduleOnRN(beginTransition, hit, e.focalY, anchorRel.get());
     })
     .onUpdate((e) => {
-      visualScale.set(Math.min(MAX_VISUAL, Math.max(MIN_VISUAL, e.scale)));
+      if (!transitioning.get() || e.numberOfPointers < 2) return;
+      const from = fromLevel.get();
+      const s = e.scale / pinchBase.get();
+      // Fingers together → zoom out (more columns); apart → zoom in.
+      const target = s < 1 ? Math.min(from + 1, LAST_LEVEL) : Math.max(from - 1, 0);
+      if (target === from) {
+        progress.set(0);
+        return;
+      }
+      if (toLevel.get() !== target) toLevel.set(target);
+      // Progress = how far the tiles have grown/shrunk toward the target size.
+      const full = GRID_ZOOM_LEVELS[from] / GRID_ZOOM_LEVELS[target];
+      const p = Math.min(1, Math.max(0, (s - 1) / (full - 1)));
+      if (p >= 1) {
+        // Reached the next level mid-pinch: make it the new base and continue.
+        fromLevel.set(target);
+        pinchBase.set(e.scale);
+        progress.set(0);
+        scheduleOnRN(extendTransition, target);
+        return;
+      }
+      progress.set(p);
     })
     .onEnd(() => {
-      scheduleOnRN(commitPinch, visualScale.get(), focalX.get(), focalY.get());
+      if (!transitioning.get()) return;
+      const complete = progress.get() >= COMMIT_AT && toLevel.get() !== fromLevel.get();
+      progress.set(
+        withTiming(complete ? 1 : 0, { duration: SETTLE_MS }, (finished) => {
+          if (!finished) return;
+          const final = complete ? toLevel.get() : fromLevel.get();
+          fromLevel.set(final);
+          toLevel.set(final);
+          progress.set(0);
+          transitioning.set(false);
+          scheduleOnRN(finishTransition, final);
+        }),
+      );
     })
     .onFinalize((_e, success) => {
-      if (!success) {
-        visualScale.set(withTiming(1, { duration: 150 }));
-        scheduleOnRN(setPinching, false);
-      }
+      if (success || !transitioning.get()) return;
+      // Cancelled before it ever became a pinch: drop back to rest.
+      const final = fromLevel.get();
+      toLevel.set(final);
+      progress.set(0);
+      transitioning.set(false);
+      scheduleOnRN(finishTransition, final);
     });
 
-  // Scale around the pinch point.
-  const zoomStyle = useAnimatedStyle(() => {
-    const dx = focalX.get() - width / 2;
-    const dy = focalY.get() - viewHeight.get() / 2;
-    return {
-      transform: [
-        { translateX: dx },
-        { translateY: dy },
-        { scale: visualScale.get() },
-        { translateX: -dx },
-        { translateY: -dy },
-      ],
-    };
+  // Taps / long-presses are resolved from the touch point (tiles have no
+  // touch handlers of their own — far fewer views to mount and animate).
+  const pressAt = useCallback(
+    (index: number, long: boolean) => {
+      const item = items[index];
+      if (!item) return;
+      if (long) onLongPressItem(item);
+      else onPressItem(item, index);
+    },
+    [items, onPressItem, onLongPressItem],
+  );
+  const resolvePress = (px: number, py: number, long: boolean) => {
+    "worklet";
+    if (transitioning.get()) return;
+    const cur = geometry.get()[fromLevel.get()];
+    if (!cur) return;
+    const cy = scrollY.get() + py;
+    const i = hitTest(cur.x, cur.y, cur.s, px, cy);
+    // Only a press actually on a tile counts (not a header or the gutter).
+    if (i < 0 || cy < cur.y[i] || cy > cur.y[i] + cur.s) return;
+    scheduleOnRN(pressAt, i, long);
+  };
+  const tap = Gesture.Tap()
+    .maxDistance(10)
+    .simultaneousWithExternalGesture(native)
+    .onEnd((e, success) => {
+      if (success) resolvePress(e.x, e.y, false);
+    });
+  const longPress = Gesture.LongPress()
+    .minDuration(250)
+    .maxDistance(10)
+    .simultaneousWithExternalGesture(native)
+    .onStart((e) => {
+      resolvePress(e.x, e.y, true);
+    });
+  const gestures = Gesture.Simultaneous(pinch, Gesture.Exclusive(longPress, tap));
+
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (e) => {
+      scrollY.set(e.contentOffset.y);
+    },
   });
 
-  // --- Rendering ------------------------------------------------------------
-  const indexById = useMemo(() => {
-    const map = new Map<string, number>();
-    items.forEach((item, i) => map.set(item.id, i));
-    return map;
-  }, [items]);
+  const onLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      viewHeight.set(e.nativeEvent.layout.height);
+      setViewportH(e.nativeEvent.layout.height);
+    },
+    [viewHeight],
+  );
 
+  // --- Sticky month (current scroll position, committed level) --------------
+  const [stickyMonth, setStickyMonth] = useState<Header | null>(null);
+  const updateSticky = useCallback(
+    (y: number) => {
+      let current: Header | null = null;
+      for (const h of layout.headers) {
+        if (h.kind !== "month") continue;
+        if (h.y <= y) current = h;
+        else break;
+      }
+      setStickyMonth((prev) => (prev?.key === current?.key ? prev : current));
+    },
+    [layout.headers],
+  );
+  useAnimatedReaction(
+    () => Math.floor(scrollY.get() / 8),
+    (bucket, prev) => {
+      if (bucket !== prev) scheduleOnRN(updateSticky, scrollY.get());
+    },
+  );
+
+  // --- Render -----------------------------------------------------------------
   const selectionActive = selectedIds.size > 0;
+  const contentHeight = Math.max(...activeLevels.map((l) => layouts[l].height), viewportH);
+  const mounted = items.slice(range[0], range[1]);
 
-  const handlePress = useCallback(
-    (id: string) => {
-      const index = indexById.get(id);
-      if (index !== undefined) onPressItem(items[index], index);
-    },
-    [indexById, items, onPressItem],
-  );
-  const handleLongPress = useCallback(
-    (id: string) => {
-      const index = indexById.get(id);
-      if (index !== undefined) onLongPressItem(items[index]);
-    },
-    [indexById, items, onLongPressItem],
-  );
-
-  const renderItem = ({ item: row }: { item: TimelineRow }) => {
-    if (row.kind === "month") {
-      return (
-        <View
-          className="flex-row items-center justify-between px-4"
-          style={{ height: MONTH_HEADER_HEIGHT, backgroundColor: colors.background }}
-        >
-          <ThemedText type="smallBold" className="text-lg">
-            {row.title}
-          </ThemedText>
-          <ThemedText type="muted" className="text-xs">
-            {row.count}
-          </ThemedText>
-        </View>
-      );
-    }
-    if (row.kind === "group") {
-      return (
-        <View className="justify-center px-4" style={{ height: GROUP_HEADER_HEIGHT }}>
-          <ThemedText type="small" style={{ color: colors.textSecondary }}>
-            {row.title}
-          </ThemedText>
-        </View>
-      );
-    }
-    if (compact) {
-      return (
-        <CompactRow
-          items={row.items}
-          tileSize={tileSize}
-          rowHeight={rowHeight}
-          selectedIds={selectedIds}
-          selectionActive={selectionActive}
-          onPress={handlePress}
-          onLongPress={handleLongPress}
-        />
-      );
-    }
+  if (items.length === 0) {
     return (
-      <View className="flex-row" style={{ gap: GAP, height: rowHeight, paddingBottom: GAP }}>
-        {row.items.map((media) => (
-          <MediaTile
-            key={media.id}
-            id={media.id}
-            uri={media.uri}
-            mediaType={media.mediaType}
-            duration={media.duration}
-            size={tileSize}
-            selectionActive={selectionActive}
-            selected={selectedIds.has(media.id)}
-            onPress={handlePress}
-            onLongPress={handleLongPress}
-          />
-        ))}
+      <View className="flex-1">
+        {isLoading ? (
+          <View className="mt-24 items-center">
+            <ActivityIndicator color={colors.textSecondary} />
+          </View>
+        ) : (
+          <View className="mt-24 items-center px-8">
+            <ThemedText type="muted" className="text-center">
+              {emptyText}
+            </ThemedText>
+          </View>
+        )}
       </View>
     );
-  };
+  }
 
   return (
-    <GestureDetector gesture={pinch}>
-      <Animated.View
-        style={[{ flex: 1 }, zoomStyle]}
-        onLayout={(e) => {
-          viewHeight.set(e.nativeEvent.layout.height);
-        }}
-      >
+    <GestureDetector gesture={gestures}>
+      <View className="flex-1" onLayout={onLayout}>
         <GestureDetector gesture={native}>
-          <FlatList
-            ref={listRef}
-            data={rows}
-            keyExtractor={(row) => row.key}
-            renderItem={renderItem}
-            getItemLayout={getItemLayout}
-            extraData={selectedIds}
-            stickyHeaderIndices={stickyIndices}
+          <Animated.ScrollView
+            ref={scrollRef}
+            onScroll={onScroll}
+            scrollEventThrottle={16}
             // Two fingers on the grid mean zoom, not scroll.
             scrollEnabled={!pinching}
-            onScroll={onScroll}
-            scrollEventThrottle={32}
-            onContentSizeChange={onContentSizeChange}
-            onEndReached={onEndReached}
-            onEndReachedThreshold={1.5}
-            initialNumToRender={12}
-            maxToRenderPerBatch={compact ? 6 : 8}
-            updateCellsBatchingPeriod={30}
-            windowSize={compact ? 5 : 9}
-            // Must be explicitly false: FlatList defaults it to true on Android, and
-            // on Fabric that crashes ("addViewAt: failed to insert view … index N")
-            // when combined with sticky headers.
-            removeClippedSubviews={false}
-            contentContainerStyle={{ paddingBottom: 24 }}
             refreshControl={
               <RefreshControl
                 refreshing={isRefreshing}
@@ -410,97 +491,233 @@ export function MediaGrid({
                 tintColor={colors.textSecondary}
               />
             }
-            ListFooterComponent={
-              isFetchingMore ? (
-                <View className="py-6">
+          >
+            <View style={{ height: contentHeight + (isFetchingMore ? 60 : 0) }}>
+              {activeLevels.map((l) => (
+                <LevelHeaders
+                  key={`headers-${l}`}
+                  level={l}
+                  headers={layouts[l].headers}
+                  fromLevel={fromLevel}
+                  toLevel={toLevel}
+                  progress={progress}
+                  background={colors.background}
+                  secondary={colors.textSecondary}
+                />
+              ))}
+              {mounted.map((item, k) => (
+                <GridTile
+                  key={item.id}
+                  item={item}
+                  index={range[0] + k}
+                  baseSize={layout.tileSize}
+                  geometry={geometry}
+                  fromLevel={fromLevel}
+                  toLevel={toLevel}
+                  progress={progress}
+                  selected={selectedIds.has(item.id)}
+                  selectionActive={selectionActive}
+                  accent={colors.accent}
+                />
+              ))}
+              {isFetchingMore && (
+                <View
+                  className="absolute left-0 right-0 items-center"
+                  style={{ top: contentHeight }}
+                >
                   <ActivityIndicator color={colors.textSecondary} />
                 </View>
-              ) : null
-            }
-            ListEmptyComponent={
-              isLoading ? (
-                <View className="mt-24 items-center">
-                  <ActivityIndicator color={colors.textSecondary} />
-                </View>
-              ) : (
-                <View className="mt-24 items-center px-8">
-                  <ThemedText type="muted" className="text-center">
-                    {emptyText}
-                  </ThemedText>
-                </View>
-              )
-            }
-          />
+              )}
+            </View>
+          </Animated.ScrollView>
         </GestureDetector>
-      </Animated.View>
+
+        {stickyMonth && (
+          <View
+            pointerEvents="none"
+            className="absolute left-0 right-0 top-0 flex-row items-center justify-between px-4"
+            style={{ height: MONTH_HEADER_HEIGHT, backgroundColor: colors.background }}
+          >
+            <ThemedText type="smallBold" className="text-lg">
+              {stickyMonth.title}
+            </ThemedText>
+            <ThemedText type="muted" className="text-xs">
+              {stickyMonth.count}
+            </ThemedText>
+          </View>
+        )}
+      </View>
     </GestureDetector>
   );
 }
 
+// ---------------------------------------------------------------------------
+
+type Geometry = SharedValue<{ x: number[]; y: number[]; s: number }[]>;
+
 /**
- * A row of tiny tiles with a single touch target (the tapped tile is worked
- * out from the touch position). At 9–15 columns this renders far fewer views
- * than one Pressable per tile, which keeps zoom changes and scrolling smooth.
+ * One thumbnail, absolutely positioned. Its spot and size are interpolated
+ * on the UI thread between the "from" and "to" zoom levels. It's laid out at
+ * `baseSize` and scaled from its top-left corner, so a transition never
+ * triggers layout — only transforms.
  */
-const CompactRow = memo(function CompactRow({
-  items,
-  tileSize,
-  rowHeight,
-  selectedIds,
+const GridTile = memo(function GridTile({
+  item,
+  index,
+  baseSize,
+  geometry,
+  fromLevel,
+  toLevel,
+  progress,
+  selected,
   selectionActive,
-  onPress,
-  onLongPress,
+  accent,
 }: {
-  items: GalleryItem[];
-  tileSize: number;
-  rowHeight: number;
-  selectedIds: ReadonlySet<string>;
+  item: GalleryItem;
+  index: number;
+  baseSize: number;
+  geometry: Geometry;
+  fromLevel: SharedValue<number>;
+  toLevel: SharedValue<number>;
+  progress: SharedValue<number>;
+  selected: boolean;
   selectionActive: boolean;
-  onPress: (id: string) => void;
-  onLongPress: (id: string) => void;
+  accent: string;
 }) {
-  const { colors } = useTheme();
-  const hit = (e: GestureResponderEvent) =>
-    items[Math.min(items.length - 1, Math.floor(e.nativeEvent.locationX / (tileSize + GAP)))];
+  const style = useAnimatedStyle(() => {
+    const g = geometry.get();
+    const a = g[fromLevel.get()];
+    const b = g[toLevel.get()];
+    if (!a || !b || a.x[index] === undefined || b.x[index] === undefined) {
+      return { opacity: 0 };
+    }
+    const p = progress.get();
+    const x = a.x[index] + (b.x[index] - a.x[index]) * p;
+    const y = a.y[index] + (b.y[index] - a.y[index]) * p;
+    const size = a.s + (b.s - a.s) * p;
+    return {
+      opacity: 1,
+      transform: [{ translateX: x }, { translateY: y }, { scale: size / baseSize }],
+    };
+  });
+
+  const showDuration = item.mediaType === "video" && baseSize >= 90 && item.duration > 0;
+  const small = baseSize < 60;
 
   return (
-    <Pressable
-      onPress={(e) => {
-        const item = hit(e);
-        if (item) onPress(item.id);
-      }}
-      onLongPress={(e) => {
-        const item = hit(e);
-        if (item) onLongPress(item.id);
-      }}
-      delayLongPress={250}
-      className="flex-row"
-      style={{ gap: GAP, height: rowHeight, paddingBottom: GAP }}
+    <Animated.View
+      style={[
+        {
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: baseSize,
+          height: baseSize,
+          transformOrigin: "left top",
+        },
+        style,
+      ]}
     >
-      {items.map((media) => {
-        const selected = selectedIds.has(media.id);
-        return (
+      <View
+        className="h-full w-full overflow-hidden"
+        style={selected ? { transform: [{ scale: 0.86 }], borderRadius: 10 } : undefined}
+      >
+        <MediaThumb id={item.id} uri={item.uri} mediaType={item.mediaType} />
+        {item.mediaType === "video" &&
+          (showDuration ? (
+            <View className="absolute bottom-1 right-1 flex-row items-center gap-0.5 rounded-full bg-black/55 px-1.5 py-0.5">
+              <Icon name="play" size={10} color="#ffffff" />
+              <ThemedText className="text-[11px] font-semibold text-white">
+                {formatDuration(item.duration)}
+              </ThemedText>
+            </View>
+          ) : (
+            <View className="absolute bottom-0.5 right-0.5 rounded-full bg-black/55 p-0.5">
+              <Icon name="play" size={small ? 7 : 10} color="#ffffff" />
+            </View>
+          ))}
+      </View>
+      {selectionActive && (
+        <View
+          className="absolute left-1 top-1 items-center justify-center rounded-full border-2"
+          style={{
+            width: small ? 12 : 20,
+            height: small ? 12 : 20,
+            borderColor: selected ? accent : "#ffffff",
+            backgroundColor: selected ? accent : "rgba(0,0,0,0.25)",
+          }}
+        >
+          {selected && <Icon name="check" size={small ? 7 : 12} color="#ffffff" />}
+        </View>
+      )}
+    </Animated.View>
+  );
+});
+
+/**
+ * Month and day/week labels for one zoom level. Mid-transition both levels'
+ * labels are mounted and crossfade (the outgoing level fades out as the
+ * incoming one fades in), since grouping differs between levels.
+ */
+const LevelHeaders = memo(function LevelHeaders({
+  level,
+  headers,
+  fromLevel,
+  toLevel,
+  progress,
+  background,
+  secondary,
+}: {
+  level: number;
+  headers: Header[];
+  fromLevel: SharedValue<number>;
+  toLevel: SharedValue<number>;
+  progress: SharedValue<number>;
+  background: string;
+  secondary: string;
+}) {
+  const style = useAnimatedStyle(() => {
+    const from = fromLevel.get();
+    const to = toLevel.get();
+    const p = progress.get();
+    let opacity = 0;
+    if (level === from && level === to) opacity = 1;
+    else if (level === from) opacity = 1 - p;
+    else if (level === to) opacity = p;
+    return { opacity };
+  });
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[{ position: "absolute", left: 0, right: 0, top: 0 }, style]}
+    >
+      {headers.map((h) =>
+        h.kind === "month" ? (
           <View
-            key={media.id}
-            style={{ width: tileSize, height: tileSize, opacity: selected ? 0.5 : 1 }}
+            key={h.key}
+            className="absolute left-0 right-0 flex-row items-center justify-between px-4"
+            style={{ top: h.y, height: MONTH_HEADER_HEIGHT, backgroundColor: background }}
           >
-            <MediaThumb id={media.id} uri={media.uri} mediaType={media.mediaType} />
-            {media.mediaType === "video" && (
-              <View className="absolute bottom-0.5 right-0.5 rounded-full bg-black/55 p-0.5">
-                <Icon name="play" size={7} color="#ffffff" />
-              </View>
-            )}
-            {selectionActive && selected && (
-              <View
-                className="absolute left-0.5 top-0.5 h-3 w-3 items-center justify-center rounded-full"
-                style={{ backgroundColor: colors.accent }}
-              >
-                <Icon name="check" size={7} color="#ffffff" />
-              </View>
-            )}
+            <ThemedText type="smallBold" className="text-lg">
+              {h.title}
+            </ThemedText>
+            <ThemedText type="muted" className="text-xs">
+              {h.count}
+            </ThemedText>
           </View>
-        );
-      })}
-    </Pressable>
+        ) : (
+          <View
+            key={h.key}
+            className="absolute left-0 right-0 justify-center px-4"
+            style={{ top: h.y, height: GROUP_HEADER_HEIGHT }}
+          >
+            <ThemedText type="small" style={{ color: secondary }}>
+              {h.title}
+            </ThemedText>
+          </View>
+        ),
+      )}
+    </Animated.View>
   );
 });
