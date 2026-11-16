@@ -87,6 +87,8 @@ export function GalleryBrowser({
   const queryClient = useQueryClient();
   const { colors } = useTheme();
   const [filter, setFilter] = useState<GalleryFilter>("all");
+  // The grid's current column count (page size follows it where paging applies).
+  const [columns, setColumns] = useState(3);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const selection = useSelection();
   const {
@@ -97,7 +99,7 @@ export function GalleryBrowser({
     hasNextPage,
     fetchNextPage,
     refetch,
-  } = useGalleryItems(filter, albumId, enabled);
+  } = useGalleryItems(filter, albumId, enabled, columns);
 
   // Hardware back clears the selection before leaving the screen.
   const { active: selectionActive, clear: clearSelection, toggle } = selection;
@@ -214,6 +216,7 @@ export function GalleryBrowser({
         selectedIds={selection.selectedIds}
         onPressItem={onPressItem}
         onSelectionChange={selection.replace}
+        onColumnsChange={setColumns}
       />
       <ConfirmSheet
         visible={confirmOpen}

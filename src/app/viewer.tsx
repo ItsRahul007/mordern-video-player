@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useMemo, useState } from "react";
@@ -25,6 +25,7 @@ import { formatBytes, formatDuration } from "@/lib/format";
 import {
   deleteGalleryItems,
   galleryItemSize,
+  resolveFileUri,
   shareGalleryItems,
   type GalleryFilter,
   type GalleryItem,
@@ -289,7 +290,14 @@ function InfoSheet({
   onClose: () => void;
 }) {
   const { colors } = useTheme();
-  const size = useMemo(() => (item ? galleryItemSize(item.uri) : null), [item]);
+  // The display URI may be content:// — look up the real file for size/path.
+  const { data: fileUri } = useQuery({
+    queryKey: ["gallery", "file-uri", item?.id ?? ""],
+    enabled: !!item,
+    queryFn: () => resolveFileUri(item as GalleryItem),
+    staleTime: Infinity,
+  });
+  const size = useMemo(() => (fileUri ? galleryItemSize(fileUri) : null), [fileUri]);
 
   const rows: [string, string][] = item
     ? [
@@ -314,7 +322,7 @@ function InfoSheet({
             ][])
           : []),
         ["Size", size != null ? formatBytes(size) : "Unknown"],
-        ["Path", item.uri.replace(/^file:\/\//, "")],
+        ["Path", fileUri ? decodePath(fileUri) : "…"],
       ]
     : [];
 
@@ -354,4 +362,14 @@ function InfoSheet({
       </Pressable>
     </Modal>
   );
+}
+
+/** file:// URI → readable filesystem path. */
+function decodePath(uri: string): string {
+  const path = uri.replace(/^file:\/\//, "");
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
 }

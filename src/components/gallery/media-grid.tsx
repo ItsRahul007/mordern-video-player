@@ -47,6 +47,14 @@ function groupingFor(columns: number): TimelineGrouping {
   return "month";
 }
 
+/**
+ * Extra screens of tiles kept mounted above and below the viewport at rest.
+ * Dense levels show hundreds of tiles per screen, so they get a thin margin.
+ */
+function bufferFor(columns: number): number {
+  return columns >= 9 ? 0.15 : 0.5;
+}
+
 /** A level plus its immediate neighbours (the levels a pinch can reach first). */
 function withNeighbours(level: number): number[] {
   return [level - 1, level, level + 1].filter((l) => l >= 0 && l <= LAST_LEVEL);
@@ -85,16 +93,18 @@ type LevelLayout = {
   columns: number;
   tileSize: number;
   /** Per item index (same order as `items`). */
-  x: number[];
-  y: number[];
+  x: Float64Array;
+  y: Float64Array;
   headers: Header[];
   height: number;
 };
 
 function computeLevel(items: GalleryItem[], columns: number, width: number): LevelLayout {
   const tileSize = (width - GAP * (columns - 1)) / columns;
-  const x = new Array<number>(items.length);
-  const y = new Array<number>(items.length);
+  // Typed arrays: copied to the UI thread as one block instead of element
+  // by element (tens of thousands of numbers across all zoom levels).
+  const x = new Float64Array(items.length);
+  const y = new Float64Array(items.length);
   const headers: Header[] = [];
   let pending: Header[] = [];
   let cursor = 0;
@@ -126,7 +136,7 @@ function computeLevel(items: GalleryItem[], columns: number, width: number): Lev
 }
 
 /** First index whose y is ≥ `value` (y is non-decreasing by index). */
-function lowerBound(ys: number[], value: number): number {
+function lowerBound(ys: Float64Array, value: number): number {
   let lo = 0;
   let hi = ys.length;
   while (lo < hi) {
@@ -144,8 +154,20 @@ function rangeFor(layout: LevelLayout, top: number, bottom: number): [number, nu
   return [start, end];
 }
 
+/**
+ * Only the labels around the mounted tiles (like the tiles themselves) —
+ * mounting every label in the library per zoom level is hundreds of views.
+ */
+function headersNear(layout: LevelLayout, range: [number, number]): Header[] {
+  const [start, end] = range;
+  if (end <= start || layout.y.length === 0) return [];
+  const top = (layout.y[start] ?? 0) - MONTH_HEADER_HEIGHT - GROUP_HEADER_HEIGHT;
+  const bottom = (layout.y[Math.min(end, layout.y.length) - 1] ?? 0) + layout.tileSize;
+  return layout.headers.filter((h) => h.y >= top && h.y <= bottom);
+}
+
 /** Worklet: tile index at content point (x, y) for a level, or -1. */
-function hitTest(xs: number[], ys: number[], size: number, px: number, py: number): number {
+function hitTest(xs: Float64Array, ys: Float64Array, size: number, px: number, py: number): number {
   "worklet";
   // Binary search for the first tile whose row reaches py.
   let lo = 0;
@@ -178,6 +200,8 @@ type MediaGridProps = {
   onPressItem: (item: GalleryItem, index: number) => void;
   /** Replace the selection (long-press, drag-select, select-a-group). */
   onSelectionChange: (next: ReadonlySet<string>) => void;
+  /** Reports the column count whenever the zoom level settles. */
+  onColumnsChange?: (columns: number) => void;
 };
 
 /**
@@ -198,6 +222,7 @@ export function MediaGrid({
   selectedIds,
   onPressItem,
   onSelectionChange,
+  onColumnsChange,
 }: MediaGridProps) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
@@ -213,7 +238,7 @@ export function MediaGrid({
   // Set in an effect (not derived) so every mounted tile's animated style is
   // re-evaluated as soon as new positions land; the version also tells the
   // scroll reaction to refresh which tiles are mounted.
-  const geometry = useSharedValue<{ x: number[]; y: number[]; s: number }[]>([]);
+  const geometry = useSharedValue<{ x: Float64Array; y: Float64Array; s: number }[]>([]);
   const geometryVersion = useSharedValue(0);
   useEffect(() => {
     geometry.set(layouts.map((l) => ({ x: l.x, y: l.y, s: l.tileSize })));
@@ -264,7 +289,7 @@ export function MediaGrid({
           anchor != null && lay.y[anchor] !== undefined
             ? lay.y[anchor] + rel * lay.tileSize - screenY
             : scrollY.get();
-        const buffer = levels.length > 1 ? 0 : h * 0.5;
+        const buffer = levels.length > 1 ? 0 : h * bufferFor(lay.columns);
         const [s, e] = rangeFor(lay, top - buffer, top + h + buffer);
         start = Math.min(start, s);
         end = Math.max(end, e);
@@ -284,7 +309,8 @@ export function MediaGrid({
       const h = viewHeight.get() || 900;
       const top = scrollY.get();
       const lay = layouts[lvl];
-      let [start, end] = rangeFor(lay, top - h * 0.5, top + h * 1.5);
+      const buf = h * bufferFor(lay.columns);
+      let [start, end] = rangeFor(lay, top - buf, top + h + buf);
       const centre = Math.min(lowerBound(lay.y, top + h / 2), Math.max(0, lay.y.length - 1));
       for (const n of withNeighbours(lvl)) {
         if (n === lvl) continue;
@@ -303,8 +329,11 @@ export function MediaGrid({
   const refreshRestingRange = useCallback(() => {
     const next = restingRange(level);
     setRange((prev) => (prev[0] === next[0] && prev[1] === next[1] ? prev : next));
-    if (next[1] >= items.length - layout.columns * 4) onEndReached();
-  }, [restingRange, level, items.length, layout.columns, onEndReached]);
+    // Ask for more ~2 screens ahead (in rows of the current size), so dense
+    // zoomed-out grids don't fill in a few rows at a time.
+    const rowsPerScreen = Math.ceil((viewHeight.get() || 900) / (layout.tileSize + GAP));
+    if (next[1] >= items.length - layout.columns * rowsPerScreen * 2) onEndReached();
+  }, [restingRange, level, items.length, layout.columns, layout.tileSize, viewHeight, onEndReached]);
 
   // Re-evaluate the mounted range every quarter screen of scrolling, and
   // whenever the layouts change (new page loaded, rotation).
@@ -354,10 +383,11 @@ export function MediaGrid({
       setPinching(false);
       scrollLocked.set(false);
       setLevel(finalLevel);
+      onColumnsChange?.(GRID_ZOOM_LEVELS[finalLevel]);
       setActiveLevels(withNeighbours(finalLevel));
       setRange(restingRange(finalLevel));
     },
-    [restingRange, scrollLocked],
+    [restingRange, scrollLocked, onColumnsChange],
   );
 
   // Keep the anchor tile under the fingers as the layout changes.
@@ -751,6 +781,12 @@ export function MediaGrid({
     maxScroll.set(Math.max(0, contentHeight - viewportH));
   }, [contentHeight, viewportH, maxScroll]);
 
+  // Labels near the mounted tiles, per active level (stable until the range moves).
+  const nearHeaders = useMemo(
+    () => new Map(activeLevels.map((l) => [l, headersNear(layouts[l], range)])),
+    [activeLevels, layouts, range],
+  );
+
   // Checkbox state for every mounted date label while selecting.
   const headerStates = useMemo(() => {
     if (!selectionActive) return null;
@@ -819,7 +855,7 @@ export function MediaGrid({
                 <LevelHeaders
                   key={`headers-${l}`}
                   level={l}
-                  headers={layouts[l].headers}
+                  headers={nearHeaders.get(l) ?? []}
                   fromLevel={fromLevel}
                   toLevel={toLevel}
                   progress={progress}
@@ -892,7 +928,7 @@ export function MediaGrid({
 
 // ---------------------------------------------------------------------------
 
-type Geometry = SharedValue<{ x: number[]; y: number[]; s: number }[]>;
+type Geometry = SharedValue<{ x: Float64Array; y: Float64Array; s: number }[]>;
 
 /** In-progress drag-select, shared with every tile for instant feedback. */
 type DragVisual = {
@@ -997,7 +1033,13 @@ const GridTile = memo(function GridTile({
       ]}
     >
       <Animated.View className="h-full w-full overflow-hidden" style={innerStyle}>
-        <MediaThumb id={item.id} uri={item.uri} mediaType={item.mediaType} />
+        <MediaThumb
+          id={item.id}
+          uri={item.uri}
+          mediaType={item.mediaType}
+          // Hundreds of tiny tiles fading in at once is wasted work.
+          transition={small ? 0 : 100}
+        />
         {item.mediaType === "video" &&
           (showDuration ? (
             <View className="absolute bottom-1 right-1 flex-row items-center gap-0.5 rounded-full bg-black/55 px-1.5 py-0.5">

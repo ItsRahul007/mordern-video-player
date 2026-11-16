@@ -8,13 +8,18 @@ import * as MediaLibrary from "expo-media-library";
 import { useEffect, useMemo } from "react";
 
 import {
-  GALLERY_PAGE_SIZE,
+  galleryPageSize,
+  IDS_ARE_URIS,
+  indexToItems,
   getGalleryAlbums,
   getGalleryIndex,
   resolveGalleryPage,
   type GalleryFilter,
   type GalleryItem,
 } from "@/lib/gallery";
+
+const INDEX_STALE_MS = 5 * 60 * 1000;
+const PREFETCH_DELAY_MS = 600;
 
 export const galleryKeys = {
   all: ["gallery"] as const,
@@ -36,27 +41,34 @@ export function useGalleryItems(
   filter: GalleryFilter,
   albumId: string | undefined,
   enabled = true,
+  /** Grid columns at the current zoom — sets the page size where paging applies. */
+  columns = 3,
 ) {
+  const pageSize = galleryPageSize(columns);
   const indexQuery = useQuery({
     queryKey: galleryKeys.index(filter, albumId),
     enabled,
     queryFn: () => getGalleryIndex(filter, albumId),
     // Library changes are pushed via useGalleryLibrarySync; don't refetch just
     // because another screen (e.g. the viewer) mounted the same list.
-    staleTime: 5 * 60 * 1000,
+    staleTime: INDEX_STALE_MS,
   });
   const index = indexQuery.data;
 
   const pagesQuery = useInfiniteQuery({
     queryKey: galleryKeys.items(filter, albumId, indexQuery.dataUpdatedAt),
-    enabled: enabled && !!index,
+    // Android displays straight from the index (ids are content:// URIs), so
+    // there's nothing to page in.
+    enabled: enabled && !!index && !IDS_ARE_URIS,
     initialPageParam: 0,
-    queryFn: ({ pageParam }) =>
-      resolveGalleryPage((index ?? []).slice(pageParam, pageParam + GALLERY_PAGE_SIZE)),
-    getNextPageParam: (_last, pages) => {
-      const next = pages.length * GALLERY_PAGE_SIZE;
-      return next < (index?.length ?? 0) ? next : undefined;
+    // Pages can differ in size (the zoom can change between fetches), so each
+    // page records where it ended and the next one starts there.
+    queryFn: async ({ pageParam }) => {
+      const end = pageParam + pageSize;
+      const items = await resolveGalleryPage((index ?? []).slice(pageParam, end));
+      return { items, end };
     },
+    getNextPageParam: (last) => (last.end < (index?.length ?? 0) ? last.end : undefined),
     staleTime: 5 * 60 * 1000,
     // Keep showing the old pages while a refreshed index re-resolves page 0,
     // instead of flashing an empty list (which also resets scroll positions).
@@ -64,26 +76,27 @@ export function useGalleryItems(
   });
 
   const items = useMemo<GalleryItem[]>(() => {
+    if (IDS_ARE_URIS) return index ? indexToItems(index) : [];
     const seen = new Set<string>();
     const out: GalleryItem[] = [];
     for (const page of pagesQuery.data?.pages ?? []) {
-      for (const item of page) {
+      for (const item of page.items) {
         if (seen.has(item.id)) continue;
         seen.add(item.id);
         out.push(item);
       }
     }
     return out;
-  }, [pagesQuery.data]);
+  }, [pagesQuery.data, index]);
 
   return {
     items,
     /** Total items in the list (known before all pages load). */
     total: index?.length ?? 0,
-    isLoading: indexQuery.isLoading || pagesQuery.isLoading,
+    isLoading: indexQuery.isLoading || (!IDS_ARE_URIS && pagesQuery.isLoading),
     isRefetching: indexQuery.isRefetching,
-    isFetchingNextPage: pagesQuery.isFetchingNextPage,
-    hasNextPage: pagesQuery.hasNextPage,
+    isFetchingNextPage: !IDS_ARE_URIS && pagesQuery.isFetchingNextPage,
+    hasNextPage: !IDS_ARE_URIS && pagesQuery.hasNextPage,
     fetchNextPage: pagesQuery.fetchNextPage,
     refetch: indexQuery.refetch,
   };
@@ -119,5 +132,26 @@ export function useGalleryLibrarySync(enabled: boolean) {
       clearTimeout(timer);
       sub.remove();
     };
+  }, [enabled, queryClient]);
+}
+
+/**
+ * Warm the Gallery while another tab (Home) is showing: load the "All"
+ * timeline's sorted index in the background, so opening Gallery skips the
+ * slow native metadata query. Waits a moment so the current screen settles
+ * first.
+ */
+export function usePrefetchGallery(enabled: boolean) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setTimeout(() => {
+      void queryClient.prefetchQuery({
+        queryKey: galleryKeys.index("all"),
+        queryFn: () => getGalleryIndex("all"),
+        staleTime: INDEX_STALE_MS,
+      });
+    }, PREFETCH_DELAY_MS);
+    return () => clearTimeout(timer);
   }, [enabled, queryClient]);
 }

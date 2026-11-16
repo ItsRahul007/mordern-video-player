@@ -7,6 +7,7 @@
  * https://docs.expo.dev/versions/v56.0.0/sdk/media-library/
  */
 import { File } from "expo-file-system";
+import { Platform } from "react-native";
 import {
   Album,
   Asset,
@@ -48,7 +49,14 @@ export type GalleryAlbum = {
   coverId: string | null;
 };
 
-export const GALLERY_PAGE_SIZE = 120;
+/**
+ * Items fetched per page where paging applies (iOS — Android displays the
+ * whole index at once). Scales with the grid density: about 10 rows of the
+ * current zoom, so 30 at 3 per row and 150 at 15 per row.
+ */
+export function galleryPageSize(columns: number): number {
+  return Math.max(30, columns * 10);
+}
 
 function baseQuery(filter: GalleryFilter, albumId?: string): Query {
   let query = new Query();
@@ -174,12 +182,41 @@ export async function deleteGalleryItems(ids: string[]): Promise<void> {
  * type narrows target apps: image/* or video/* when uniform, otherwise any.
  */
 export async function shareGalleryItems(items: GalleryItem[]): Promise<number> {
-  const shareable = items.filter((i) => i.uri.startsWith("file://"));
+  // Display URIs may be content:// — sharing needs real file paths.
+  const resolved = await Promise.all(
+    items.map(async (i) => ({ item: i, uri: await resolveFileUri(i).catch(() => null) })),
+  );
+  const shareable = resolved.filter(
+    (r): r is { item: GalleryItem; uri: string } => !!r.uri && r.uri.startsWith("file://"),
+  );
   if (shareable.length === 0) throw new Error("These items can't be shared.");
-  const types = new Set(shareable.map((i) => i.mediaType));
+  const types = new Set(shareable.map((r) => r.item.mediaType));
   const mime =
     types.size === 1 ? (types.has("image") ? "image/*" : "video/*") : "*/*";
-  return shareFiles(shareable.map((i) => fileUriToPath(i.uri)), mime);
+  return shareFiles(shareable.map((r) => fileUriToPath(r.uri)), mime);
+}
+
+/**
+ * The item's file:// URI (needed for sharing, file size, showing the path).
+ * Gallery items on Android display from their content:// id, so the real
+ * path is only looked up on demand.
+ */
+export async function resolveFileUri(item: GalleryItem): Promise<string> {
+  if (item.uri.startsWith("file://")) return item.uri;
+  return new Asset(item.id).getUri();
+}
+
+/**
+ * Android only: every asset id is already a MediaStore content:// URI, which
+ * expo-image (Glide) and expo-video load directly. Using it as the display
+ * URI skips one native path lookup per item — so the whole index is
+ * displayable at once — and lets Glide serve small tiles from Android's
+ * pre-generated MediaStore thumbnails instead of decoding full-size files.
+ */
+export const IDS_ARE_URIS = Platform.OS === "android";
+
+export function indexToItems(index: GalleryIndexEntry[]): GalleryItem[] {
+  return index.map((entry) => ({ ...entry, uri: entry.id }));
 }
 
 /** File size in bytes, or null when unavailable. */
@@ -200,84 +237,119 @@ export type TimelineRow =
   | { kind: "group"; key: string; title: string; count: number }
   | { kind: "row"; key: string; items: GalleryItem[]; startIndex: number };
 
-const DAY = 24 * 60 * 60 * 1000;
-
-type Group = { key: string; title: string };
-
-function monthGroup(time: number, now: Date): Group {
-  if (!time) return { key: "unknown", title: "Unknown date" };
-  const d = new Date(time);
-  const sameYear = d.getFullYear() === now.getFullYear();
-  const title = d.toLocaleDateString(undefined, {
-    month: "long",
-    ...(sameYear ? {} : { year: "numeric" }),
-  });
-  return { key: `${d.getFullYear()}-${d.getMonth()}`, title };
-}
-
-function dayGroup(time: number, now: Date): Group {
-  if (!time) return { key: "unknown", title: "Unknown date" };
-  const d = new Date(time);
-  const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  if (time >= startOfToday) return { key, title: "Today" };
-  if (time >= startOfToday - DAY) return { key, title: "Yesterday" };
-  const title = d.toLocaleDateString(undefined, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-  });
-  return { key, title };
-}
-
-/** Monday 00:00 of the week containing `d`. */
-function startOfWeek(d: Date): Date {
-  const day = (d.getDay() + 6) % 7; // Mon = 0 … Sun = 6
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - day);
-}
-
-function weekGroup(time: number, now: Date): Group {
-  if (!time) return { key: "unknown", title: "Unknown date" };
-  const d = new Date(time);
-  const start = startOfWeek(d);
-  const key = `w-${start.getFullYear()}-${start.getMonth()}-${start.getDate()}`;
-  const thisWeek = startOfWeek(now).getTime();
-  if (start.getTime() === thisWeek) return { key, title: "This week" };
-  if (start.getTime() === thisWeek - 7 * DAY) return { key, title: "Last week" };
-  // Weeks are listed inside their month, so clip the range to that month.
-  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
-  const from = start.getMonth() === d.getMonth() ? start : new Date(d.getFullYear(), d.getMonth(), 1);
-  const to =
-    end.getMonth() === d.getMonth() ? end : new Date(d.getFullYear(), d.getMonth() + 1, 0);
-  const month = d.toLocaleDateString(undefined, { month: "short" });
-  const title =
-    from.getDate() === to.getDate()
-      ? `${from.getDate()} ${month}`
-      : `${from.getDate()} – ${to.getDate()} ${month}`;
-  // The key must also be per-month, since a week can straddle two months.
-  return { key: `${key}-${d.getMonth()}`, title };
-}
 
 /** How the timeline is sub-grouped under each month. */
 export type TimelineGrouping = "day" | "week" | "month";
 
-/** Index just past the run of items (from `start`) sharing one group key. */
-function runEnd(
-  items: GalleryItem[],
-  start: number,
-  end: number,
-  groupOf: (time: number, now: Date) => Group,
-  now: Date,
-): number {
-  const key = groupOf(items[start].creationTime, now).key;
-  let j = start;
-  while (j < end && groupOf(items[j].creationTime, now).key === key) j++;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Formatting dates is slow on Hermes — formatters are created once, and
+// labels are only formatted once per group (never per item).
+let formatters: {
+  month: Intl.DateTimeFormat;
+  monthYear: Intl.DateTimeFormat;
+  day: Intl.DateTimeFormat;
+  shortMonth: Intl.DateTimeFormat;
+} | null = null;
+function fmt() {
+  formatters ??= {
+    month: new Intl.DateTimeFormat(undefined, { month: "long" }),
+    monthYear: new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }),
+    day: new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" }),
+    shortMonth: new Intl.DateTimeFormat(undefined, { month: "short" }),
+  };
+  return formatters;
+}
+
+/**
+ * Local calendar parts for every item, computed once per item list (cached)
+ * and shared by all zoom levels. Groups are then compared by plain numbers.
+ */
+type DateParts = {
+  /** year*12 + month, or -1 when the date is unknown. */
+  month: Int32Array;
+  /** year*10000 + month*100 + day, or -1. */
+  day: Int32Array;
+  /** Monday-of-week as year*10000 + month*100 + day, or -1. */
+  week: Int32Array;
+};
+const partsCache = new WeakMap<GalleryItem[], DateParts>();
+
+function dateParts(items: GalleryItem[]): DateParts {
+  const cached = partsCache.get(items);
+  if (cached) return cached;
+  const n = items.length;
+  const parts: DateParts = {
+    month: new Int32Array(n),
+    day: new Int32Array(n),
+    week: new Int32Array(n),
+  };
+  for (let i = 0; i < n; i++) {
+    const t = items[i].creationTime;
+    if (!t) {
+      parts.month[i] = parts.day[i] = parts.week[i] = -1;
+      continue;
+    }
+    const d = new Date(t);
+    const y = d.getFullYear();
+    const m = d.getMonth();
+    const dd = d.getDate();
+    parts.month[i] = y * 12 + m;
+    parts.day[i] = y * 10000 + m * 100 + dd;
+    const ws = new Date(y, m, dd - ((d.getDay() + 6) % 7)); // Monday
+    parts.week[i] = ws.getFullYear() * 10000 + ws.getMonth() * 100 + ws.getDate();
+  }
+  partsCache.set(items, parts);
+  return parts;
+}
+
+function dayKeyToDate(key: number): Date {
+  return new Date(Math.floor(key / 10000), Math.floor(key / 100) % 100, key % 100);
+}
+
+function monthTitle(key: number, now: Date): string {
+  if (key < 0) return "Unknown date";
+  const y = Math.floor(key / 12);
+  const date = new Date(y, key % 12, 1);
+  return y === now.getFullYear() ? fmt().month.format(date) : fmt().monthYear.format(date);
+}
+
+function dayTitle(key: number, now: Date): string {
+  if (key < 0) return "Unknown date";
+  const date = dayKeyToDate(key);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (date.getTime() === today) return "Today";
+  if (date.getTime() === today - DAY_MS) return "Yesterday";
+  return fmt().day.format(date);
+}
+
+/** Week label, clipped to the month it's listed under ("16 – 22 Nov"). */
+function weekTitle(weekKey: number, monthKey: number, now: Date): string {
+  if (weekKey < 0) return "Unknown date";
+  const start = dayKeyToDate(weekKey);
+  const nowMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
+  if (start.getTime() === nowMonday.getTime()) return "This week";
+  if (start.getTime() === nowMonday.getTime() - 7 * DAY_MS) return "Last week";
+  const y = Math.floor(monthKey / 12);
+  const m = monthKey % 12;
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
+  const from = start.getMonth() === m ? start.getDate() : 1;
+  const to = end.getMonth() === m ? end.getDate() : new Date(y, m + 1, 0).getDate();
+  const month = fmt().shortMonth.format(new Date(y, m, 1));
+  return from === to ? `${from} ${month}` : `${from} – ${to} ${month}`;
+}
+
+/** Index just past the run (from `start`, before `end`) sharing keys[start]. */
+function runEnd(keys: Int32Array, start: number, end: number): number {
+  const key = keys[start];
+  let j = start + 1;
+  while (j < end && keys[j] === key) j++;
   return j;
 }
 
 /**
  * Flatten items (already newest-first) into month headers, optional day/week
- * sub-headers, and rows of `columns` tiles, so one FlatList can render a
+ * sub-headers, and rows of `columns` tiles, so one list can render a
  * sectioned grid with sticky month headers. `startIndex` is the index of the
  * row's first item in the flat `items` list.
  */
@@ -288,6 +360,7 @@ export function buildTimeline(
 ): TimelineRow[] {
   const rows: TimelineRow[] = [];
   const now = new Date();
+  const parts = dateParts(items);
   // Keep keys unique even if a group ever appears in two separate runs.
   const seen = new Map<string, number>();
   const uniqueKey = (base: string) => {
@@ -308,27 +381,28 @@ export function buildTimeline(
 
   let i = 0;
   while (i < items.length) {
-    const month = monthGroup(items[i].creationTime, now);
-    const monthEnd = runEnd(items, i, items.length, monthGroup, now);
+    const monthKey = parts.month[i];
+    const monthEnd = runEnd(parts.month, i, items.length);
     rows.push({
       kind: "month",
-      key: uniqueKey(`m-${month.key}`),
-      title: month.title,
+      key: uniqueKey(`m-${monthKey}`),
+      title: monthTitle(monthKey, now),
       count: monthEnd - i,
     });
 
     if (grouping === "month") {
       pushTiles(i, monthEnd);
     } else {
-      const groupOf = grouping === "day" ? dayGroup : weekGroup;
+      const keys = grouping === "day" ? parts.day : parts.week;
       let g = i;
       while (g < monthEnd) {
-        const group = groupOf(items[g].creationTime, now);
-        const groupEnd = runEnd(items, g, monthEnd, groupOf, now);
+        const key = keys[g];
+        const groupEnd = runEnd(keys, g, monthEnd);
         rows.push({
           kind: "group",
-          key: uniqueKey(`g-${group.key}`),
-          title: group.title,
+          // Weeks can straddle months, so their key includes the month.
+          key: uniqueKey(`g-${grouping[0]}${key}-${monthKey}`),
+          title: grouping === "day" ? dayTitle(key, now) : weekTitle(key, monthKey, now),
           count: groupEnd - g,
         });
         pushTiles(g, groupEnd);

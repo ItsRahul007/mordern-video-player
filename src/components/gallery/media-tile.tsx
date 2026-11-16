@@ -15,6 +15,8 @@ type MediaThumbProps = {
   mediaType: GalleryMediaType;
   /** "cover" for grid tiles, "contain" for full-screen posters. */
   fit?: "cover" | "contain";
+  /** Fade-in duration (ms) once the image has loaded. */
+  transition?: number;
 };
 
 /**
@@ -23,7 +25,13 @@ type MediaThumbProps = {
  * pull a frame from the file — fast and parallel — and fall back to the app's
  * serial, disk-cached thumbnail generator if that fails.
  */
-export function MediaThumb({ id, uri, mediaType, fit = "cover" }: MediaThumbProps) {
+export function MediaThumb({
+  id,
+  uri,
+  mediaType,
+  fit = "cover",
+  transition = 120,
+}: MediaThumbProps) {
   const { colors } = useTheme();
   const [imageFailed, setImageFailed] = useState(false);
   const tryImage =
@@ -45,7 +53,7 @@ export function MediaThumb({ id, uri, mediaType, fit = "cover" }: MediaThumbProp
           style={StyleSheet.absoluteFill}
           contentFit={fit}
           cachePolicy="memory-disk"
-          transition={120}
+          transition={transition}
           onError={() => setImageFailed(true)}
         />
       )}
