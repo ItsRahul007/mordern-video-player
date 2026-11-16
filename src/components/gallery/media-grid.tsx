@@ -10,6 +10,7 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   scrollTo,
   useAnimatedProps,
+  useFrameCallback,
   useAnimatedReaction,
   useAnimatedRef,
   useAnimatedScrollHandler,
@@ -47,6 +48,18 @@ function withNeighbours(level: number): number[] {
   return [level - 1, level, level + 1].filter((l) => l >= 0 && l <= LAST_LEVEL);
 }
 
+/** Hold this long on a tile to start selecting (and drag-selecting). */
+const LONG_PRESS_MS = 250;
+/** Drag-select auto-scrolls when the finger is this close to an edge (dp)… */
+const AUTO_SCROLL_EDGE = 90;
+/** …but only after the finger has moved this far since the hold began (dp). */
+const AUTO_SCROLL_ARM = 16;
+/** …at up to this many dp per frame. */
+const AUTO_SCROLL_SPEED = 18;
+
+/** While drag-selecting, React's selection state is synced at most this often (ms). */
+const DRAG_SYNC_MS = 80;
+
 /** Release past this much of a transition completes it; otherwise it springs back. */
 const COMMIT_AT = 0.4;
 const SETTLE_MS = 200;
@@ -60,6 +73,8 @@ type Header = {
   title: string;
   count: number;
   y: number;
+  /** Index of the first item under this header (its items are start…start+count). */
+  start: number;
 };
 
 type LevelLayout = {
@@ -77,16 +92,29 @@ function computeLevel(items: GalleryItem[], columns: number, width: number): Lev
   const x = new Array<number>(items.length);
   const y = new Array<number>(items.length);
   const headers: Header[] = [];
+  let pending: Header[] = [];
   let cursor = 0;
   for (const row of buildTimeline(items, columns, groupingFor(columns))) {
     if (row.kind === "row") {
+      // Headers come right before their first row.
+      for (const h of pending) h.start = row.startIndex;
+      pending = [];
       row.items.forEach((_, c) => {
         x[row.startIndex + c] = c * (tileSize + GAP);
         y[row.startIndex + c] = cursor;
       });
       cursor += tileSize + GAP;
     } else {
-      headers.push({ key: row.key, kind: row.kind, title: row.title, count: row.count, y: cursor });
+      const header: Header = {
+        key: row.key,
+        kind: row.kind,
+        title: row.title,
+        count: row.count,
+        y: cursor,
+        start: 0,
+      };
+      headers.push(header);
+      pending.push(header);
       cursor += row.kind === "month" ? MONTH_HEADER_HEIGHT : GROUP_HEADER_HEIGHT;
     }
   }
@@ -144,7 +172,8 @@ type MediaGridProps = {
   emptyText: string;
   selectedIds: ReadonlySet<string>;
   onPressItem: (item: GalleryItem, index: number) => void;
-  onLongPressItem: (item: GalleryItem) => void;
+  /** Replace the selection (long-press, drag-select, select-a-group). */
+  onSelectionChange: (next: ReadonlySet<string>) => void;
 };
 
 /**
@@ -164,7 +193,7 @@ export function MediaGrid({
   emptyText,
   selectedIds,
   onPressItem,
-  onLongPressItem,
+  onSelectionChange,
 }: MediaGridProps) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
@@ -436,55 +465,31 @@ export function MediaGrid({
       scheduleOnRN(finishTransition, final);
     });
 
-  // Taps / long-presses are resolved from the touch point (tiles have no
-  // touch handlers of their own — far fewer views to mount and animate).
+  // Taps are resolved from the touch point (tiles have no touch handlers of
+  // their own — far fewer views to mount and animate).
+  const selectionActive = selectedIds.size > 0;
+
   const pressAt = useCallback(
-    (index: number, long: boolean) => {
+    (index: number) => {
       const item = items[index];
-      if (!item) return;
-      if (long) onLongPressItem(item);
-      else onPressItem(item, index);
+      if (item) onPressItem(item, index);
     },
-    [items, onPressItem, onLongPressItem],
+    [items, onPressItem],
   );
-  const resolvePress = (px: number, py: number, long: boolean) => {
-    "worklet";
-    if (transitioning.get()) return;
-    const cur = geometry.get()[fromLevel.get()];
-    if (!cur) return;
-    const cy = scrollY.get() + py;
-    const i = hitTest(cur.x, cur.y, cur.s, px, cy);
-    // Only a press actually on a tile counts (not a header or the gutter).
-    if (i < 0 || cy < cur.y[i] || cy > cur.y[i] + cur.s) return;
-    scheduleOnRN(pressAt, i, long);
-  };
-  const tap = Gesture.Tap()
-    .maxDistance(10)
-    .simultaneousWithExternalGesture(native)
-    .onEnd((e, success) => {
-      if (success) resolvePress(e.x, e.y, false);
-    });
-  const longPress = Gesture.LongPress()
-    .minDuration(250)
-    .maxDistance(10)
-    .simultaneousWithExternalGesture(native)
-    .onStart((e) => {
-      resolvePress(e.x, e.y, true);
-    });
-  const gestures = Gesture.Simultaneous(pinch, Gesture.Exclusive(longPress, tap));
 
-  const onScroll = useAnimatedScrollHandler({
-    onScroll: (e) => {
-      scrollY.set(e.contentOffset.y);
+  /** Select every item under a header — or unselect them if all already are. */
+  const toggleGroup = useCallback(
+    (h: Header) => {
+      const ids = items.slice(h.start, h.start + h.count).map((i) => i.id);
+      const all = ids.every((id) => selectedIds.has(id));
+      const next = new Set(selectedIds);
+      for (const id of ids) {
+        if (all) next.delete(id);
+        else next.add(id);
+      }
+      onSelectionChange(next);
     },
-  });
-
-  const onLayout = useCallback(
-    (e: LayoutChangeEvent) => {
-      viewHeight.set(e.nativeEvent.layout.height);
-      setViewportH(e.nativeEvent.layout.height);
-    },
-    [viewHeight],
+    [items, selectedIds, onSelectionChange],
   );
 
   // --- Sticky month (current scroll position, committed level) --------------
@@ -508,10 +513,255 @@ export function MediaGrid({
     },
   );
 
+  /** A tap that missed the tiles: in selection mode, a date label toggles its group. */
+  const pressHeader = useCallback(
+    (contentY: number, screenY: number) => {
+      if (!selectionActive) return;
+      if (screenY < MONTH_HEADER_HEIGHT && stickyMonth) {
+        toggleGroup(stickyMonth);
+        return;
+      }
+      for (const h of layout.headers) {
+        const height = h.kind === "month" ? MONTH_HEADER_HEIGHT : GROUP_HEADER_HEIGHT;
+        if (contentY >= h.y && contentY < h.y + height) {
+          toggleGroup(h);
+          return;
+        }
+      }
+    },
+    [selectionActive, stickyMonth, layout.headers, toggleGroup],
+  );
+
+  /** Worklet: tile index under a screen point at the committed level (-1 if none). */
+  const tileAt = (px: number, py: number, sy: number, exact: boolean) => {
+    "worklet";
+    const cur = geometry.get()[fromLevel.get()];
+    if (!cur) return -1;
+    const cy = sy + py;
+    const i = hitTest(cur.x, cur.y, cur.s, px, cy);
+    if (i < 0) return -1;
+    // Forgive the thin gutter between rows; a press on a date label still misses.
+    if (exact && (cy < cur.y[i] - GAP - 1 || cy > cur.y[i] + cur.s + GAP + 1)) return -1;
+    return i;
+  };
+
+  const resolvePress = (px: number, py: number) => {
+    "worklet";
+    if (transitioning.get()) return;
+    const sy = scrollY.get();
+    // The pinned month bar covers the top of the grid.
+    const i = py < MONTH_HEADER_HEIGHT ? -1 : tileAt(px, py, sy, true);
+    if (i >= 0) scheduleOnRN(pressAt, i);
+    else scheduleOnRN(pressHeader, sy + py, py);
+  };
+
+  const tap = Gesture.Tap()
+    .maxDistance(10)
+    .simultaneousWithExternalGesture(native)
+    .onEnd((e, success) => {
+      if (success) resolvePress(e.x, e.y);
+    });
+
+  // --- Drag-select ------------------------------------------------------------
+  // Hold a tile, then (without lifting) drag: everything between it and the
+  // finger is selected — or unselected, if the held tile was selected. Near
+  // the top/bottom edge the grid auto-scrolls to keep extending.
+  // Drag state lives in shared values (not React state) so every caller —
+  // gesture callbacks and the auto-scroll frame loop — sees it immediately.
+  const dragBase = useSharedValue<string[]>([]);
+  const dragAnchor = useSharedValue(-1);
+  const dragSelects = useSharedValue(true);
+
+  /** Selection = `base` with every item between `anchor` and `to` (un)selected. */
+  const applyDrag = useCallback(
+    (base: Iterable<string>, anchor: number, select: boolean, to: number) => {
+      const next = new Set(base);
+      const lo = Math.min(anchor, to);
+      const hi = Math.max(anchor, to);
+      for (let i = lo; i <= hi; i++) {
+        const id = items[i]?.id;
+        if (!id) continue;
+        if (select) next.add(id);
+        else next.delete(id);
+      }
+      onSelectionChange(next);
+    },
+    [items, onSelectionChange],
+  );
+
+  // Later drag moves read the session from shared values. (Values written
+  // from JS reach the UI runtime asynchronously, so the first move — in
+  // beginDrag — uses its own locals instead of reading them back.)
+  const updateDrag = useCallback(
+    (to: number) => {
+      const anchor = dragAnchor.get();
+      if (anchor < 0) return;
+      applyDrag(dragBase.get(), anchor, dragSelects.get(), to);
+    },
+    [applyDrag, dragAnchor, dragBase, dragSelects],
+  );
+
+  /** True once a drag session's anchor/mode have reached the UI thread. */
+  const dragLive = useSharedValue(false);
+  const lastPush = useSharedValue(0);
+  /** Send the drag target to React at most every DRAG_SYNC_MS (tiles already
+   *  show it instantly on the UI thread); the release always sends the last. */
+  const pushDrag = (i: number) => {
+    "worklet";
+    const now = Date.now();
+    if (now - lastPush.get() < DRAG_SYNC_MS) return;
+    lastPush.set(now);
+    scheduleOnRN(updateDrag, i);
+  };
+
+  const dragging = useSharedValue(false);
+  /** Auto-scroll only arms once the finger has really moved after the hold,
+   *  so holding a tile near an edge never scrolls by itself. */
+  const dragArmed = useSharedValue(false);
+  const dragStartX = useSharedValue(0);
+  const dragStartY = useSharedValue(0);
+  const dragX = useSharedValue(0);
+  const dragY = useSharedValue(0);
+  const dragLast = useSharedValue(-1);
+  const maxScroll = useSharedValue(0);
+
+  const autoScroll = useFrameCallback(() => {
+    if (!dragging.get() || !dragArmed.get()) return;
+    const h = viewHeight.get();
+    const y = dragY.get();
+    const top = MONTH_HEADER_HEIGHT + AUTO_SCROLL_EDGE;
+    let v = 0;
+    if (y < top) v = -Math.min(1, (top - y) / AUTO_SCROLL_EDGE) * AUTO_SCROLL_SPEED;
+    else if (y > h - AUTO_SCROLL_EDGE)
+      v = Math.min(1, (y - (h - AUTO_SCROLL_EDGE)) / AUTO_SCROLL_EDGE) * AUTO_SCROLL_SPEED;
+    if (v === 0) return;
+    const cur = scrollY.get();
+    const next = Math.min(maxScroll.get(), Math.max(0, cur + v));
+    if (next === cur) return;
+    scrollTo(scrollRef, 0, next, false);
+    scrollY.set(next);
+    // Content moved under a still finger: extend to whatever is there now.
+    const i = tileAt(dragX.get(), y, next, false);
+    if (i >= 0 && i !== dragLast.get()) {
+      dragLast.set(i);
+      pushDrag(i);
+    }
+  }, false);
+
+  const beginDrag = useCallback(
+    (index: number) => {
+      const id = items[index]?.id;
+      if (!id) return;
+      const base = [...selectedIds];
+      const select = !selectedIds.has(id);
+      dragBase.set(base);
+      dragAnchor.set(index);
+      dragSelects.set(select);
+      dragLive.set(true);
+      applyDrag(base, index, select, index);
+      autoScroll.setActive(true);
+    },
+    [items, selectedIds, applyDrag, autoScroll, dragBase, dragAnchor, dragSelects, dragLive],
+  );
+  /** Release: apply the exact final range, then hand the visuals back to React. */
+  const endDrag = useCallback(
+    (last: number) => {
+      updateDrag(last);
+      dragLive.set(false);
+      dragAnchor.set(-1);
+      autoScroll.setActive(false);
+    },
+    [updateDrag, autoScroll, dragAnchor, dragLive],
+  );
+
+  const dragSelect = Gesture.Pan()
+    .activateAfterLongPress(LONG_PRESS_MS)
+    .simultaneousWithExternalGesture(native)
+    .onStart((e) => {
+      if (transitioning.get() || e.y < MONTH_HEADER_HEIGHT) return;
+      const i = tileAt(e.x, e.y, scrollY.get(), true);
+      if (i < 0) return;
+      dragging.set(true);
+      dragArmed.set(false);
+      dragStartX.set(e.x);
+      dragStartY.set(e.y);
+      scrollLocked.set(true); // the drag selects; it must not scroll the list
+      dragX.set(e.x);
+      dragY.set(e.y);
+      dragLast.set(i);
+      lastPush.set(0);
+      scheduleOnRN(beginDrag, i);
+    })
+    .onUpdate((e) => {
+      if (!dragging.get()) return;
+      dragX.set(e.x);
+      dragY.set(e.y);
+      if (
+        !dragArmed.get() &&
+        Math.hypot(e.x - dragStartX.get(), e.y - dragStartY.get()) > AUTO_SCROLL_ARM
+      ) {
+        dragArmed.set(true);
+      }
+      const i = tileAt(e.x, e.y, scrollY.get(), false);
+      if (i >= 0 && i !== dragLast.get()) {
+        dragLast.set(i);
+        pushDrag(i);
+      }
+    })
+    .onFinalize(() => {
+      if (!dragging.get()) return;
+      dragging.set(false);
+      scrollLocked.set(false);
+      scheduleOnRN(endDrag, dragLast.get());
+    });
+
+  const gestures = Gesture.Simultaneous(pinch, Gesture.Exclusive(dragSelect, tap));
+
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (e) => {
+      scrollY.set(e.contentOffset.y);
+    },
+  });
+
+  const onLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      viewHeight.set(e.nativeEvent.layout.height);
+      setViewportH(e.nativeEvent.layout.height);
+    },
+    [viewHeight],
+  );
+
   // --- Render -----------------------------------------------------------------
-  const selectionActive = selectedIds.size > 0;
   const contentHeight = Math.max(...activeLevels.map((l) => layouts[l].height), viewportH);
   const mounted = items.slice(range[0], range[1]);
+
+  // Shared values the tiles read to draw an in-progress drag instantly.
+  const dragVisual = useMemo(
+    () => ({ live: dragLive, anchor: dragAnchor, to: dragLast, select: dragSelects }),
+    [dragLive, dragAnchor, dragLast, dragSelects],
+  );
+
+  // How far drag-select auto-scroll may go.
+  useEffect(() => {
+    maxScroll.set(Math.max(0, contentHeight - viewportH));
+  }, [contentHeight, viewportH, maxScroll]);
+
+  // Checkbox state for every mounted date label while selecting.
+  const headerStates = useMemo(() => {
+    if (!selectionActive) return null;
+    const states = new Map<string, CheckState>();
+    for (const l of activeLevels) {
+      for (const h of layouts[l].headers) {
+        if (states.has(h.key)) continue;
+        let n = 0;
+        for (let i = h.start; i < h.start + h.count; i++) {
+          if (items[i] && selectedIds.has(items[i].id)) n++;
+        }
+        states.set(h.key, n === 0 ? "none" : n === h.count ? "all" : "some");
+      }
+    }
+    return states;
+  }, [selectionActive, activeLevels, layouts, items, selectedIds]);
 
   if (items.length === 0) {
     return (
@@ -564,6 +814,8 @@ export function MediaGrid({
                   progress={progress}
                   background={colors.background}
                   secondary={colors.textSecondary}
+                  accent={colors.accent}
+                  states={headerStates}
                 />
               ))}
               {mounted.map((item, k) => (
@@ -579,6 +831,7 @@ export function MediaGrid({
                   selected={selectedIds.has(item.id)}
                   selectionActive={selectionActive}
                   accent={colors.accent}
+                  drag={dragVisual}
                 />
               ))}
               {isFetchingMore && (
@@ -602,9 +855,14 @@ export function MediaGrid({
             <ThemedText type="smallBold" className="text-lg">
               {stickyMonth.title}
             </ThemedText>
-            <ThemedText type="muted" className="text-xs">
-              {stickyMonth.count}
-            </ThemedText>
+            <View className="flex-row items-center gap-3">
+              <ThemedText type="muted" className="text-xs">
+                {stickyMonth.count}
+              </ThemedText>
+              {headerStates && (
+                <GroupCheck state={headerStates.get(stickyMonth.key) ?? "none"} accent={colors.accent} />
+              )}
+            </View>
           </View>
         )}
       </View>
@@ -615,6 +873,14 @@ export function MediaGrid({
 // ---------------------------------------------------------------------------
 
 type Geometry = SharedValue<{ x: number[]; y: number[]; s: number }[]>;
+
+/** In-progress drag-select, shared with every tile for instant feedback. */
+type DragVisual = {
+  live: SharedValue<boolean>;
+  anchor: SharedValue<number>;
+  to: SharedValue<number>;
+  select: SharedValue<boolean>;
+};
 
 /**
  * One thumbnail, absolutely positioned. Its spot and size are interpolated
@@ -633,6 +899,7 @@ const GridTile = memo(function GridTile({
   selected,
   selectionActive,
   accent,
+  drag,
 }: {
   item: GalleryItem;
   index: number;
@@ -644,6 +911,7 @@ const GridTile = memo(function GridTile({
   selected: boolean;
   selectionActive: boolean;
   accent: string;
+  drag: DragVisual;
 }) {
   const style = useAnimatedStyle(() => {
     const g = geometry.get();
@@ -662,6 +930,35 @@ const GridTile = memo(function GridTile({
     };
   });
 
+  // Selected look, decided on the UI thread: inside an in-progress drag the
+  // range wins (instant feedback); otherwise React's selection state.
+  const isSelected = () => {
+    "worklet";
+    if (drag.live.get()) {
+      const a = drag.anchor.get();
+      const t = drag.to.get();
+      if (a >= 0 && index >= Math.min(a, t) && index <= Math.max(a, t)) {
+        return drag.select.get();
+      }
+    }
+    return selected;
+  };
+  const innerStyle = useAnimatedStyle(() => {
+    const on = isSelected();
+    return {
+      transform: [{ scale: withTiming(on ? 0.86 : 1, { duration: 90 }) }],
+      borderRadius: on ? 10 : 0,
+    };
+  });
+  const checkStyle = useAnimatedStyle(() => {
+    const on = isSelected();
+    return {
+      borderColor: on ? accent : "#ffffff",
+      backgroundColor: on ? accent : "rgba(0,0,0,0.25)",
+    };
+  });
+  const tickStyle = useAnimatedStyle(() => ({ opacity: isSelected() ? 1 : 0 }));
+
   const showDuration = item.mediaType === "video" && baseSize >= 90 && item.duration > 0;
   const small = baseSize < 60;
 
@@ -679,10 +976,7 @@ const GridTile = memo(function GridTile({
         style,
       ]}
     >
-      <View
-        className="h-full w-full overflow-hidden"
-        style={selected ? { transform: [{ scale: 0.86 }], borderRadius: 10 } : undefined}
-      >
+      <Animated.View className="h-full w-full overflow-hidden" style={innerStyle}>
         <MediaThumb id={item.id} uri={item.uri} mediaType={item.mediaType} />
         {item.mediaType === "video" &&
           (showDuration ? (
@@ -697,19 +991,16 @@ const GridTile = memo(function GridTile({
               <Icon name="play" size={small ? 7 : 10} color="#ffffff" />
             </View>
           ))}
-      </View>
+      </Animated.View>
       {selectionActive && (
-        <View
+        <Animated.View
           className="absolute left-1 top-1 items-center justify-center rounded-full border-2"
-          style={{
-            width: small ? 12 : 20,
-            height: small ? 12 : 20,
-            borderColor: selected ? accent : "#ffffff",
-            backgroundColor: selected ? accent : "rgba(0,0,0,0.25)",
-          }}
+          style={[{ width: small ? 12 : 20, height: small ? 12 : 20 }, checkStyle]}
         >
-          {selected && <Icon name="check" size={small ? 7 : 12} color="#ffffff" />}
-        </View>
+          <Animated.View style={tickStyle}>
+            <Icon name="check" size={small ? 7 : 12} color="#ffffff" />
+          </Animated.View>
+        </Animated.View>
       )}
     </Animated.View>
   );
@@ -728,6 +1019,8 @@ const LevelHeaders = memo(function LevelHeaders({
   progress,
   background,
   secondary,
+  accent,
+  states,
 }: {
   level: number;
   headers: Header[];
@@ -736,6 +1029,9 @@ const LevelHeaders = memo(function LevelHeaders({
   progress: SharedValue<number>;
   background: string;
   secondary: string;
+  accent: string;
+  /** Checkbox state per header key while selecting; null otherwise. */
+  states: Map<string, CheckState> | null;
 }) {
   const style = useAnimatedStyle(() => {
     const from = fromLevel.get();
@@ -763,22 +1059,45 @@ const LevelHeaders = memo(function LevelHeaders({
             <ThemedText type="smallBold" className="text-lg">
               {h.title}
             </ThemedText>
-            <ThemedText type="muted" className="text-xs">
-              {h.count}
-            </ThemedText>
+            <View className="flex-row items-center gap-3">
+              <ThemedText type="muted" className="text-xs">
+                {h.count}
+              </ThemedText>
+              {states && <GroupCheck state={states.get(h.key) ?? "none"} accent={accent} />}
+            </View>
           </View>
         ) : (
           <View
             key={h.key}
-            className="absolute left-0 right-0 justify-center px-4"
+            className="absolute left-0 right-0 flex-row items-center justify-between px-4"
             style={{ top: h.y, height: GROUP_HEADER_HEIGHT }}
           >
             <ThemedText type="small" style={{ color: secondary }}>
               {h.title}
             </ThemedText>
+            {states && <GroupCheck state={states.get(h.key) ?? "none"} accent={accent} />}
           </View>
         ),
       )}
     </Animated.View>
   );
 });
+
+type CheckState = "none" | "some" | "all";
+
+/** Round checkbox for a date label: empty, partly selected (dash), or all. */
+function GroupCheck({ state, accent }: { state: CheckState; accent: string }) {
+  const filled = state !== "none";
+  return (
+    <View
+      className="h-[22px] w-[22px] items-center justify-center rounded-full border-2"
+      style={{
+        borderColor: filled ? accent : "#9ca3af",
+        backgroundColor: filled ? accent : "transparent",
+      }}
+    >
+      {state === "all" && <Icon name="check" size={13} color="#ffffff" />}
+      {state === "some" && <View className="h-[2px] w-[10px] rounded-full bg-white" />}
+    </View>
+  );
+}

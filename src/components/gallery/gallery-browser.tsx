@@ -124,7 +124,6 @@ export function GalleryBrowser({
     },
     [selectionActive, toggle, router, filter, albumId],
   );
-  const onLongPressItem = useCallback((item: GalleryItem) => toggle(item.id), [toggle]);
 
   const selectedItems = () => items.filter((i) => selection.isSelected(i.id));
 
@@ -211,7 +210,7 @@ export function GalleryBrowser({
         emptyText={emptyText}
         selectedIds={selection.selectedIds}
         onPressItem={onPressItem}
-        onLongPressItem={onLongPressItem}
+        onSelectionChange={selection.replace}
       />
       <ConfirmSheet
         visible={confirmOpen}

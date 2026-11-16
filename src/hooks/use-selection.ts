@@ -21,6 +21,9 @@ export function useSelection() {
 
   const clear = useCallback(() => setSelectedIds(new Set()), []);
 
+  /** Replace the whole selection at once (drag-select, select-a-group). */
+  const replace = useCallback((next: ReadonlySet<string>) => setSelectedIds(next), []);
+
   return {
     selectedIds,
     count: selectedIds.size,
@@ -28,5 +31,6 @@ export function useSelection() {
     isSelected: (id: string) => selectedIds.has(id),
     toggle,
     clear,
+    replace,
   };
 }
