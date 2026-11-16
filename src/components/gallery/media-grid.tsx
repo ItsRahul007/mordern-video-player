@@ -9,6 +9,7 @@ import {
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   scrollTo,
+  useAnimatedProps,
   useAnimatedReaction,
   useAnimatedRef,
   useAnimatedScrollHandler,
@@ -39,6 +40,11 @@ function groupingFor(columns: number): TimelineGrouping {
   if (columns <= 4) return "day";
   if (columns <= 7) return "week";
   return "month";
+}
+
+/** A level plus its immediate neighbours (the levels a pinch can reach first). */
+function withNeighbours(level: number): number[] {
+  return [level - 1, level, level + 1].filter((l) => l >= 0 && l <= LAST_LEVEL);
 }
 
 /** Release past this much of a transition completes it; otherwise it springs back. */
@@ -201,10 +207,15 @@ export function MediaGrid({
 
   // Which levels' headers are mounted (more than one mid-transition), and
   // the mounted tile index range.
-  const [activeLevels, setActiveLevels] = useState<number[]>([0]);
+  // Neighbouring levels are kept mounted at rest (invisible) so a pinch
+  // never has to build anything when it starts.
+  const [activeLevels, setActiveLevels] = useState<number[]>(() => withNeighbours(0));
   // Start with roughly the first screen and a half mounted.
   const [range, setRange] = useState<[number, number]>(() => rangeFor(layouts[0], 0, 1400));
   const [pinching, setPinching] = useState(false);
+  // Scroll lock while two fingers are down (UI thread, see the pinch).
+  const scrollLocked = useSharedValue(false);
+  const scrollProps = useAnimatedProps(() => ({ scrollEnabled: !scrollLocked.get() }));
 
   // --- Mounted range --------------------------------------------------------
   const computeRange = useCallback(
@@ -229,11 +240,37 @@ export function MediaGrid({
     [layouts, scrollY, viewHeight],
   );
 
+  /**
+   * Tiles to keep mounted at rest for `lvl`: its own visible band (plus half
+   * a screen each way) AND what each neighbouring level would show around the
+   * same spot — so the tiles a pinch needs are already there when it starts.
+   */
+  const restingRange = useCallback(
+    (lvl: number): [number, number] => {
+      const h = viewHeight.get() || 900;
+      const top = scrollY.get();
+      const lay = layouts[lvl];
+      let [start, end] = rangeFor(lay, top - h * 0.5, top + h * 1.5);
+      const centre = Math.min(lowerBound(lay.y, top + h / 2), Math.max(0, lay.y.length - 1));
+      for (const n of withNeighbours(lvl)) {
+        if (n === lvl) continue;
+        const nl = layouts[n];
+        if (nl.y[centre] === undefined) continue;
+        const t = nl.y[centre] + nl.tileSize / 2 - h / 2;
+        const [s, e] = rangeFor(nl, t, t + h);
+        start = Math.min(start, s);
+        end = Math.max(end, e);
+      }
+      return [Math.min(start, end), end];
+    },
+    [layouts, scrollY, viewHeight],
+  );
+
   const refreshRestingRange = useCallback(() => {
-    const next = computeRange([level], null, 0, 0);
+    const next = restingRange(level);
     setRange((prev) => (prev[0] === next[0] && prev[1] === next[1] ? prev : next));
     if (next[1] >= items.length - layout.columns * 4) onEndReached();
-  }, [computeRange, level, items.length, layout.columns, onEndReached]);
+  }, [restingRange, level, items.length, layout.columns, onEndReached]);
 
   // Re-evaluate the mounted range every quarter screen of scrolling, and
   // whenever the layouts change (new page loaded, rotation).
@@ -250,9 +287,12 @@ export function MediaGrid({
   const beginTransition = useCallback(
     (anchor: number, screenY: number, rel: number) => {
       setPinching(true);
-      const levels = [level - 1, level, level + 1].filter((l) => l >= 0 && l <= LAST_LEVEL);
-      setActiveLevels(levels);
-      setRange(computeRange(levels, anchor, screenY, rel));
+      // Usually already covered by the resting range; only grow if needed
+      // (never shrink mid-gesture — that would unmount visible tiles).
+      const [s, e] = computeRange(withNeighbours(level), anchor, screenY, rel);
+      setRange((prev) =>
+        s >= prev[0] && e <= prev[1] ? prev : [Math.min(prev[0], s), Math.max(prev[1], e)],
+      );
     },
     [level, computeRange],
   );
@@ -260,9 +300,7 @@ export function MediaGrid({
   // Walked past a level mid-pinch: mount the next neighbour too.
   const extendTransition = useCallback(
     (newFrom: number) => {
-      const levels = [newFrom - 1, newFrom, newFrom + 1].filter(
-        (l) => l >= 0 && l <= LAST_LEVEL,
-      );
+      const levels = withNeighbours(newFrom);
       setActiveLevels((prev) => Array.from(new Set([...prev, ...levels])));
       setRange((prev) => {
         const [s, e] = computeRange(
@@ -280,14 +318,12 @@ export function MediaGrid({
   const finishTransition = useCallback(
     (finalLevel: number) => {
       setPinching(false);
+      scrollLocked.set(false);
       setLevel(finalLevel);
-      setActiveLevels([finalLevel]);
-      const lay = layouts[finalLevel];
-      const h = viewHeight.get() || 900;
-      const top = scrollY.get();
-      setRange(rangeFor(lay, top - h * 0.5, top + h * 1.5));
+      setActiveLevels(withNeighbours(finalLevel));
+      setRange(restingRange(finalLevel));
     },
-    [layouts, scrollY, viewHeight],
+    [restingRange, scrollLocked],
   );
 
   // Keep the anchor tile under the fingers as the layout changes.
@@ -312,8 +348,24 @@ export function MediaGrid({
   const pinchBase = useSharedValue(1);
   const native = Gesture.Native();
 
+  // Lock scrolling (and pull-to-refresh) the instant a second finger lands,
+  // on the UI thread — waiting for the pinch to activate, or for a React
+  // re-render, lets the list start scrolling/refreshing first.
+  const unlockIfIdle = () => {
+    "worklet";
+    if (transitioning.get()) return; // finishTransition unlocks
+    scrollLocked.set(false);
+    scheduleOnRN(setPinching, false);
+  };
+
   const pinch = Gesture.Pinch()
     .simultaneousWithExternalGesture(native)
+    .onTouchesDown((e) => {
+      if (e.numberOfTouches >= 2) {
+        scrollLocked.set(true);
+        scheduleOnRN(setPinching, true);
+      }
+    })
     .onStart((e) => {
       const g = geometry.get();
       const cur = g[fromLevel.get()];
@@ -370,7 +422,12 @@ export function MediaGrid({
       );
     })
     .onFinalize((_e, success) => {
-      if (success || !transitioning.get()) return;
+      if (!transitioning.get()) {
+        // Two fingers went down but never became a pinch.
+        unlockIfIdle();
+        return;
+      }
+      if (success) return;
       // Cancelled before it ever became a pinch: drop back to rest.
       const final = fromLevel.get();
       toLevel.set(final);
@@ -483,11 +540,15 @@ export function MediaGrid({
             onScroll={onScroll}
             scrollEventThrottle={16}
             // Two fingers on the grid mean zoom, not scroll.
-            scrollEnabled={!pinching}
+            animatedProps={scrollProps}
             refreshControl={
               <RefreshControl
                 refreshing={isRefreshing}
                 onRefresh={onRefresh}
+                // Two fingers mean zoom: never start a refresh then.
+                enabled={!pinching}
+                // Start the spinner below the pinned month bar, not under it.
+                progressViewOffset={MONTH_HEADER_HEIGHT}
                 tintColor={colors.textSecondary}
               />
             }
