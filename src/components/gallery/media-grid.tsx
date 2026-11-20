@@ -202,6 +202,10 @@ type MediaGridProps = {
   onSelectionChange: (next: ReadonlySet<string>) => void;
   /** Reports the column count whenever the zoom level settles. */
   onColumnsChange?: (columns: number) => void;
+  /** Changing this (e.g. a new search or filter) scrolls back to the top. */
+  scrollResetKey?: string;
+  /** Extra space at the end of the grid (e.g. under a floating tab bar). */
+  bottomInset?: number;
 };
 
 /**
@@ -223,6 +227,8 @@ export function MediaGrid({
   onPressItem,
   onSelectionChange,
   onColumnsChange,
+  scrollResetKey,
+  bottomInset = 0,
 }: MediaGridProps) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
@@ -542,9 +548,11 @@ export function MediaGrid({
     [layout.headers],
   );
   useAnimatedReaction(
-    () => Math.floor(scrollY.get() / 8),
-    (bucket, prev) => {
-      if (bucket !== prev) scheduleOnRN(updateSticky, scrollY.get());
+    // Also when the layout changes (search, filter, new items) — otherwise
+    // the pinned bar keeps showing a month from the previous list.
+    () => Math.floor(scrollY.get() / 8) * 100000 + geometryVersion.get(),
+    (key, prev) => {
+      if (key !== prev) scheduleOnRN(updateSticky, scrollY.get());
     },
   );
 
@@ -776,10 +784,15 @@ export function MediaGrid({
     [dragLive, dragAnchor, dragLast, dragSelects],
   );
 
+  // A different list (search / filter): start from the top.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ y: 0, animated: false });
+  }, [scrollResetKey, scrollRef]);
+
   // How far drag-select auto-scroll may go.
   useEffect(() => {
-    maxScroll.set(Math.max(0, contentHeight - viewportH));
-  }, [contentHeight, viewportH, maxScroll]);
+    maxScroll.set(Math.max(0, contentHeight + bottomInset - viewportH));
+  }, [contentHeight, bottomInset, viewportH, maxScroll]);
 
   // Labels near the mounted tiles, per active level (stable until the range moves).
   const nearHeaders = useMemo(
@@ -848,7 +861,10 @@ export function MediaGrid({
           >
             <View
               style={{
-                height: contentHeight + (isFetchingMore ? FOOTER_ROWS * (layout.tileSize + GAP) : 0),
+                height:
+                  contentHeight +
+                  bottomInset +
+                  (isFetchingMore ? FOOTER_ROWS * (layout.tileSize + GAP) : 0),
               }}
             >
               {activeLevels.map((l) => (

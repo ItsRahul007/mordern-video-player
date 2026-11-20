@@ -413,3 +413,163 @@ export function buildTimeline(
   }
   return rows;
 }
+
+// ---------------------------------------------------------------------------
+// Search
+//
+// There's no on-device image recognition, so search uses what the library
+// knows about each item: its date, its type and its file name. Words combine
+// (AND); words of the same kind widen each other (OR) — "oct nov 2025 video"
+// means October or November 2025, videos only.
+
+let monthNames: string[] | null = null;
+/** Lower-case full month names in the device locale (cached). */
+function localMonthNames(): string[] {
+  monthNames ??= Array.from({ length: 12 }, (_, m) =>
+    new Intl.DateTimeFormat(undefined, { month: "long" }).format(new Date(2024, m, 1)).toLowerCase(),
+  );
+  return monthNames;
+}
+
+const TYPE_WORDS: Record<string, GalleryMediaType> = {
+  video: "video",
+  videos: "video",
+  clip: "video",
+  clips: "video",
+  photo: "image",
+  photos: "image",
+  image: "image",
+  images: "image",
+  picture: "image",
+  pictures: "image",
+  pic: "image",
+  pics: "image",
+};
+
+/** Words that match file names written by well-known apps. */
+const NAME_PATTERNS: Record<string, RegExp> = {
+  screenshot: /screenshot|screen_shot|scrnshot/i,
+  screenshots: /screenshot|screen_shot|scrnshot/i,
+  whatsapp: /-WA\d+|whatsapp/i,
+  instagram: /instagram|^insta/i,
+  camera: /^(IMG|VID|PXL)_\d{8}/i,
+};
+
+type ParsedQuery = {
+  months: Set<number>;
+  years: Set<number>;
+  days: Set<number>;
+  types: Set<GalleryMediaType>;
+  /** Day keys (year*10000 + month*100 + day) from today/yesterday. */
+  dayKeys: Set<number>;
+  /** Month keys (year*12 + month) from this/last month. */
+  monthKeys: Set<number>;
+  patterns: RegExp[];
+  /** Everything else: must appear in the file name. */
+  text: string[];
+};
+
+function parseQuery(query: string, now: Date): ParsedQuery {
+  const q: ParsedQuery = {
+    months: new Set(),
+    years: new Set(),
+    days: new Set(),
+    types: new Set(),
+    dayKeys: new Set(),
+    monthKeys: new Set(),
+    patterns: [],
+    text: [],
+  };
+  const names = localMonthNames();
+  const dayKey = (d: Date) => d.getFullYear() * 10000 + d.getMonth() * 100 + d.getDate();
+  const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const next = words[i + 1];
+    if (w === "today") {
+      q.dayKeys.add(dayKey(now));
+    } else if (w === "yesterday") {
+      q.dayKeys.add(dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)));
+    } else if ((w === "this" || w === "last") && (next === "month" || next === "year")) {
+      const offset = w === "this" ? 0 : 1;
+      if (next === "month") {
+        const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+        q.monthKeys.add(d.getFullYear() * 12 + d.getMonth());
+      } else {
+        q.years.add(now.getFullYear() - offset);
+      }
+      i++;
+    } else if (TYPE_WORDS[w]) {
+      q.types.add(TYPE_WORDS[w]);
+    } else if (NAME_PATTERNS[w]) {
+      q.patterns.push(NAME_PATTERNS[w]);
+    } else if (/^(19|20)\d{2}$/.test(w)) {
+      q.years.add(Number(w));
+    } else if (/^\d{1,2}$/.test(w) && Number(w) >= 1 && Number(w) <= 31) {
+      q.days.add(Number(w));
+    } else if (w.length >= 3 && names.some((n) => n.startsWith(w))) {
+      names.forEach((n, m) => {
+        if (n.startsWith(w)) q.months.add(m);
+      });
+    } else {
+      q.text.push(w);
+    }
+  }
+  return q;
+}
+
+/**
+ * Items matching a search query (same order). An empty query returns the
+ * list unchanged.
+ */
+export function searchGallery(items: GalleryItem[], query: string): GalleryItem[] {
+  if (!query.trim()) return items;
+  const q = parseQuery(query, new Date());
+  const parts = dateParts(items);
+  const out: GalleryItem[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (q.types.size && !q.types.has(item.mediaType)) continue;
+    const monthKey = parts.month[i];
+    const dayKey = parts.day[i];
+    if (q.years.size || q.months.size || q.days.size || q.dayKeys.size || q.monthKeys.size) {
+      if (monthKey < 0) continue; // undated items can't match a date
+      const year = Math.floor(monthKey / 12);
+      if (q.years.size && !q.years.has(year)) continue;
+      if (q.months.size && !q.months.has(monthKey % 12)) continue;
+      if (q.days.size && !q.days.has(dayKey % 100)) continue;
+      if (q.dayKeys.size && !q.dayKeys.has(dayKey)) continue;
+      if (q.monthKeys.size && !q.monthKeys.has(monthKey)) continue;
+    }
+    if (q.patterns.length && !q.patterns.some((p) => p.test(item.filename))) continue;
+    if (q.text.length) {
+      const name = item.filename.toLowerCase();
+      if (!q.text.every((t) => name.includes(t))) continue;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+/** Search ideas built from what's actually in the library. */
+export function searchSuggestions(items: GalleryItem[]): string[] {
+  const parts = dateParts(items);
+  const years = new Set<number>();
+  let videos = false;
+  let screenshots = false;
+  let whatsapp = false;
+  for (let i = 0; i < items.length; i++) {
+    if (parts.month[i] >= 0) years.add(Math.floor(parts.month[i] / 12));
+    const item = items[i];
+    if (item.mediaType === "video") videos = true;
+    if (!screenshots && NAME_PATTERNS.screenshot.test(item.filename)) screenshots = true;
+    if (!whatsapp && NAME_PATTERNS.whatsapp.test(item.filename)) whatsapp = true;
+  }
+  const out = ["This month"];
+  if (videos) out.push("Videos");
+  if (screenshots) out.push("Screenshots");
+  if (whatsapp) out.push("WhatsApp");
+  out.push(...[...years].sort((a, b) => b - a).slice(0, 4).map(String));
+  return out;
+}

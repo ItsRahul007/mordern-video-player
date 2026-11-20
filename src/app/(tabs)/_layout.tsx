@@ -11,7 +11,10 @@ export default function TabsLayout() {
   return (
     <Tabs
       tabBar={(props) => <AppTabBar {...props} />}
-      screenOptions={{ headerShown: false, animation: "fade" }}
+      // No cross-fade: when tabs are switched quickly the JS fade can be
+      // interrupted and leave a screen stuck at opacity 0 (a blank Gallery).
+      // The navbar's sliding capsule already animates the switch.
+      screenOptions={{ headerShown: false, animation: "none" }}
     >
       <Tabs.Screen name="index" options={{ title: "Home" }} />
       <Tabs.Screen name="gallery" options={{ title: "Gallery" }} />

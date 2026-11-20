@@ -14,6 +14,7 @@ import {
   getGalleryAlbums,
   getGalleryIndex,
   resolveGalleryPage,
+  searchGallery,
   type GalleryFilter,
   type GalleryItem,
 } from "@/lib/gallery";
@@ -43,6 +44,8 @@ export function useGalleryItems(
   enabled = true,
   /** Grid columns at the current zoom — sets the page size where paging applies. */
   columns = 3,
+  /** Search text (dates, types, file names); empty shows everything. */
+  query = "",
 ) {
   const pageSize = galleryPageSize(columns);
   const indexQuery = useQuery({
@@ -89,8 +92,12 @@ export function useGalleryItems(
     return out;
   }, [pagesQuery.data, index]);
 
+  const results = useMemo(() => searchGallery(items, query), [items, query]);
+
   return {
-    items,
+    items: results,
+    /** Unfiltered items (for search suggestions). */
+    allItems: items,
     /** Total items in the list (known before all pages load). */
     total: index?.length ?? 0,
     isLoading: indexQuery.isLoading || (!IDS_ARE_URIS && pagesQuery.isLoading),
