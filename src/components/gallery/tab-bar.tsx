@@ -1,5 +1,11 @@
 import { Pressable, View } from "react-native";
-import Animated, { useAnimatedStyle } from "react-native-reanimated";
+import { useState } from "react";
+import Animated, {
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  type SharedValue,
+} from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Icon, type IconName } from "@/components/icon";
@@ -97,36 +103,131 @@ export function AppTabBar() {
           ]}
         />
 
-        {PAGER_TABS.map((tab, index) => {
-          const focused = focusedIndex === index;
-          return (
-            <Pressable
-              key={tab.name}
-              onPress={() => {
-                if (!focused) goTo(index);
-              }}
-              accessibilityRole="tab"
-              accessibilityState={{ selected: focused }}
-              accessibilityLabel={tab.label}
-              // Plain style object: NativeWind drops function styles when a
-              // className is present, which collapsed the slots.
-              style={{ width: SLOT, height: SLOT_H }}
-              className="flex-row items-center justify-center gap-2 active:opacity-75"
-            >
-              <Icon
-                name={TAB_ICONS[tab.name] ?? "home"}
-                size={22}
-                color={focused ? onAccent : colors.textSecondary}
-              />
-              {focused && (
-                <ThemedText className="text-[15px] font-semibold" style={{ color: onAccent }}>
-                  {tab.label}
-                </ThemedText>
-              )}
-            </Pressable>
-          );
-        })}
+        {PAGER_TABS.map((tab, index) => (
+          <DockTab
+            key={tab.name}
+            index={index}
+            label={tab.label}
+            icon={TAB_ICONS[tab.name] ?? "home"}
+            focused={focusedIndex === index}
+            position={position}
+            onAccent={onAccent}
+            inactiveColor={colors.textSecondary}
+            onPress={() => {
+              if (focusedIndex !== index) goTo(index);
+            }}
+          />
+        ))}
       </View>
     </View>
+  );
+}
+
+/** Gap between icon and label when fully shown (dp). */
+const LABEL_GAP = 8;
+
+/**
+ * One tab in the dock. How "active" it looks is derived continuously from
+ * the pager position (1 when its page is centred, 0 a page away), so the
+ * label grows in, the icon crossfades to white and scales up — in step with
+ * the pages and the capsule, live under the finger during a swipe.
+ */
+function DockTab({
+  index,
+  label,
+  icon,
+  focused,
+  position,
+  onAccent,
+  inactiveColor,
+  onPress,
+}: {
+  index: number;
+  label: string;
+  icon: IconName;
+  focused: boolean;
+  position: SharedValue<number>;
+  onAccent: string;
+  inactiveColor: string;
+  onPress: () => void;
+}) {
+  // Natural label width, measured once from an invisible copy.
+  const labelW = useSharedValue(0);
+  const [measured, setMeasured] = useState<number | null>(null);
+
+  // Each style reads `position` itself (not through a helper) so Reanimated
+  // sees the dependency and re-runs it every frame of a swipe.
+  const labelStyle = useAnimatedStyle(() => {
+    const a = 1 - Math.min(1, Math.abs(position.get() - index));
+    return {
+      width: labelW.get() * a,
+      marginLeft: LABEL_GAP * a,
+      // Text arrives a beat after the width opens, and leaves first.
+      opacity: interpolate(a, [0.35, 1], [0, 1], "clamp"),
+      transform: [{ translateX: interpolate(a, [0, 1], [-6, 0]) }],
+    };
+  });
+  const iconScale = useAnimatedStyle(() => {
+    const a = 1 - Math.min(1, Math.abs(position.get() - index));
+    return { transform: [{ scale: interpolate(a, [0, 1], [1, 1.08]) }] };
+  });
+  const whiteIcon = useAnimatedStyle(() => ({
+    opacity: 1 - Math.min(1, Math.abs(position.get() - index)),
+  }));
+  const grayIcon = useAnimatedStyle(() => ({
+    opacity: Math.min(1, Math.abs(position.get() - index)),
+  }));
+
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="tab"
+      accessibilityState={{ selected: focused }}
+      accessibilityLabel={label}
+      // Plain style object: NativeWind drops function styles when a
+      // className is present, which collapsed the slots.
+      style={{ width: SLOT, height: SLOT_H }}
+      className="flex-row items-center justify-center active:opacity-75"
+    >
+      {/* Two stacked icons crossfade (tint colour itself can't animate). */}
+      <Animated.View style={iconScale}>
+        <Animated.View style={grayIcon}>
+          <Icon name={icon} size={22} color={inactiveColor} />
+        </Animated.View>
+        <Animated.View className="absolute inset-0" style={whiteIcon}>
+          <Icon name={icon} size={22} color={onAccent} />
+        </Animated.View>
+      </Animated.View>
+
+      <Animated.View className="overflow-hidden" style={labelStyle}>
+        {/* Fixed at its natural width: the container clips it while
+            collapsing, so it slides away instead of truncating to "Ho…". */}
+        <ThemedText
+          numberOfLines={1}
+          ellipsizeMode="clip"
+          className="text-[15px] font-semibold"
+          // A little slack over the measured width so it never wraps.
+          style={{ color: onAccent, width: (measured ?? 196) + 4 }}
+        >
+          {label}
+        </ThemedText>
+      </Animated.View>
+
+      {/* Invisible copy, only to measure the label's natural width. */}
+      {measured == null && (
+        <View className="absolute opacity-0" pointerEvents="none">
+          <ThemedText
+            className="text-[15px] font-semibold"
+            onLayout={(e) => {
+              const w = Math.ceil(e.nativeEvent.layout.width) + 4;
+              labelW.set(w);
+              setMeasured(w);
+            }}
+          >
+            {label}
+          </ThemedText>
+        </View>
+      )}
+    </Pressable>
   );
 }

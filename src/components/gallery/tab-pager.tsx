@@ -62,8 +62,15 @@ export function useTabPager(): PagerContextValue {
   return ctx;
 }
 
-function indexFor(pathname: string): number {
-  return pathname.startsWith("/gallery") ? 1 : 0;
+/**
+ * The tab a URL belongs to, or null for screens pushed on top of the tabs
+ * (album, viewer, player, settings…). Those must not move the pager — it
+ * should stay on the tab underneath them.
+ */
+function tabIndexFor(pathname: string): number | null {
+  if (pathname === "/") return 0;
+  if (pathname === "/gallery") return 1;
+  return null;
 }
 
 /**
@@ -74,7 +81,10 @@ export function TabPagerProvider({ children }: PropsWithChildren) {
   const router = useRouter();
   const pathname = usePathname();
   const { width } = useWindowDimensions();
-  const index = indexFor(pathname);
+  const tabIndex = tabIndexFor(pathname);
+  // Last tab route seen; unchanged while another screen is on top.
+  const [index, setIndex] = useState(tabIndex ?? 0);
+  if (tabIndex !== null && tabIndex !== index) setIndex(tabIndex);
 
   const position = useSharedValue(index);
   const settling = useSharedValue(-1);

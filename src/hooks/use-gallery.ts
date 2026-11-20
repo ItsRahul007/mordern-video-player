@@ -21,6 +21,8 @@ import {
 
 const INDEX_STALE_MS = 5 * 60 * 1000;
 const PREFETCH_DELAY_MS = 600;
+/** After opening the Gallery, wait this long before loading albums. */
+const ALBUMS_PREFETCH_DELAY_MS = 1200;
 
 export const galleryKeys = {
   all: ["gallery"] as const,
@@ -115,6 +117,8 @@ export function useGalleryAlbums(enabled = true) {
     queryKey: galleryKeys.albums,
     enabled,
     queryFn: getGalleryAlbums,
+    // Prefetched from Home; refreshed by useGalleryLibrarySync on changes.
+    staleTime: INDEX_STALE_MS,
   });
 }
 
@@ -159,6 +163,26 @@ export function usePrefetchGallery(enabled: boolean) {
         staleTime: INDEX_STALE_MS,
       });
     }, PREFETCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [enabled, queryClient]);
+}
+
+/**
+ * Load the album list in the background — called while the Gallery's Photos
+ * view is open, so the Albums switch is instant without adding work at app
+ * launch (one media query per album is too heavy to run at start-up).
+ */
+export function usePrefetchAlbums(enabled: boolean) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setTimeout(() => {
+      void queryClient.prefetchQuery({
+        queryKey: galleryKeys.albums,
+        queryFn: getGalleryAlbums,
+        staleTime: INDEX_STALE_MS,
+      });
+    }, ALBUMS_PREFETCH_DELAY_MS);
     return () => clearTimeout(timer);
   }, [enabled, queryClient]);
 }

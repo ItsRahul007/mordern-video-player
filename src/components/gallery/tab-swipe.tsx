@@ -22,6 +22,8 @@ const VELOCITY = 600;
 export function TabSwipe({ children }: { children: ReactNode }) {
   const { position, settling, width, goTo } = useTabPager();
   const base = useSharedValue(0);
+  /** True only while a swipe has actually started (activated). */
+  const active = useSharedValue(false);
 
   const pan = Gesture.Pan()
     .maxPointers(1)
@@ -29,6 +31,7 @@ export function TabSwipe({ children }: { children: ReactNode }) {
     .failOffsetY([-14, 14])
     .onStart(() => {
       base.set(Math.round(position.get()));
+      active.set(true);
     })
     .onUpdate((e) => {
       const p = base.get() - e.translationX / width;
@@ -52,6 +55,12 @@ export function TabSwipe({ children }: { children: ReactNode }) {
       if (target !== from) scheduleOnRN(goTo, target);
     })
     .onFinalize((_e, success) => {
+      // Only a swipe that really started may move the pager here. Taps and
+      // vertical scrolls also end in onFinalize (as failed gestures) and must
+      // leave it alone — `base` is stale for them, which used to send the
+      // pager to Home when tapping an album.
+      if (!active.get()) return;
+      active.set(false);
       // Cancelled mid-drag (e.g. another gesture won): settle where we were.
       if (!success) position.set(settlePager(position.get(), base.get()));
     });
