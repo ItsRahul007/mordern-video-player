@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 import { View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { useSharedValue, withSpring } from "react-native-reanimated";
+import { useSharedValue } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
 
-import { PAGER_SPRING, PAGER_TABS, useTabPager } from "@/components/gallery/tab-pager";
+import { PAGER_TABS, settlePager, useTabPager } from "@/components/gallery/tab-pager";
 
 const LAST = PAGER_TABS.length - 1;
 /** Release past this fraction of a page… */
@@ -48,12 +48,12 @@ export function TabSwipe({ children }: { children: ReactNode }) {
       else if (e.velocityX > VELOCITY || moved > DISTANCE) target = from - 1;
       target = Math.max(0, Math.min(LAST, target));
       if (target !== from) settling.set(target);
-      position.set(withSpring(target, { ...PAGER_SPRING, velocity: -e.velocityX / width }));
+      position.set(settlePager(position.get(), target));
       if (target !== from) scheduleOnRN(goTo, target);
     })
     .onFinalize((_e, success) => {
       // Cancelled mid-drag (e.g. another gesture won): settle where we were.
-      if (!success) position.set(withSpring(base.get(), PAGER_SPRING));
+      if (!success) position.set(settlePager(position.get(), base.get()));
     });
 
   return (

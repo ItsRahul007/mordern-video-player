@@ -12,8 +12,9 @@ import {
 import { StyleSheet, useWindowDimensions } from "react-native";
 import Animated, {
   useAnimatedStyle,
+  Easing,
   useSharedValue,
-  withSpring,
+  withTiming,
   type SharedValue,
 } from "react-native-reanimated";
 
@@ -26,7 +27,19 @@ const LAST = PAGER_TABS.length - 1;
 
 /** Mount the other tabs this long after start-up, so they're ready to slide in. */
 const WARM_DELAY_MS = 1500;
-export const PAGER_SPRING = { damping: 24, stiffness: 240, mass: 0.8, overshootClamping: true };
+/**
+ * Animate the pager to `target` with an eased-out glide. Duration scales with
+ * the distance left (a full page ≈ 420 ms, a nearly finished swipe ≈ 300 ms)
+ * and ignores flick speed, so a quick flick doesn't end in a blink.
+ */
+export function settlePager(from: number, target: number) {
+  "worklet";
+  const remaining = Math.min(1, Math.abs(target - from));
+  return withTiming(target, {
+    duration: 300 + 120 * remaining,
+    easing: Easing.out(Easing.cubic),
+  });
+}
 
 type PagerContextValue = {
   /** Pager position in pages (0 = Home, 1 = Gallery); fractional mid-swipe. */
@@ -73,7 +86,7 @@ export function TabPagerProvider({ children }: PropsWithChildren) {
       settling.set(-1);
       return;
     }
-    position.set(withSpring(index, PAGER_SPRING));
+    position.set(settlePager(position.get(), index));
   }, [index, position, settling]);
 
   const [warm, setWarm] = useState(false);
