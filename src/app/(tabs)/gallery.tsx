@@ -12,6 +12,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { AlbumCard } from "@/components/gallery/album-card";
 import { SkeletonBlock, useSkeletonClock } from "@/components/gallery/skeleton";
+import { useTabBarInset } from "@/components/gallery/tab-bar";
+import { TabSwipe } from "@/components/gallery/tab-swipe";
 import { GalleryBrowser } from "@/components/gallery/gallery-browser";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
@@ -106,6 +108,7 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
   const { width } = useWindowDimensions();
   const { data: albums, isLoading, isRefetching, refetch } = useGalleryAlbums();
   const clock = useSkeletonClock();
+  const tabBarInset = useTabBarInset();
   const gap = 14;
   const cardWidth = Math.floor((width - 16 * 2 - gap) / 2);
 
@@ -121,12 +124,13 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
   return (
     <>
       {header}
+      <TabSwipe>
       <FlatList
         data={albums}
         keyExtractor={(a) => a.id}
         numColumns={2}
         columnWrapperStyle={{ gap, paddingHorizontal: 16 }}
-        contentContainerStyle={{ gap: 18, paddingTop: 8, paddingBottom: 24 }}
+        contentContainerStyle={{ gap: 18, paddingTop: 8, paddingBottom: 24 + tabBarInset }}
         renderItem={({ item }) => (
           <AlbumCard album={item} width={cardWidth} onPress={openAlbum} />
         )}
@@ -147,6 +151,7 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
           )
         }
       />
+      </TabSwipe>
     </>
   );
 }
@@ -154,23 +159,39 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
 export default function GalleryScreen() {
   const { colors } = useTheme();
   const { permission, granted, requestPermission } = useMediaPermissions();
+  const tabBarInset = useTabBarInset();
   // On a cold start the permission is unknown for a moment — that's loading,
   // not "denied", so don't flash the grant-access screen.
   const checking = permission == null;
   const [segment, setSegment] = useState<Segment>("photos");
   useGalleryLibrarySync(granted);
 
-  const titleRow = (
+  const titleRow = (onSearch?: () => void) => (
     <View className="flex-row items-center justify-between px-4 pb-3 pt-2">
       <ThemedText type="title">Gallery</ThemedText>
-      {(granted || checking) && <SegmentedControl value={segment} onChange={setSegment} />}
+      {(granted || checking) && (
+        <View className="flex-row items-center gap-2">
+          {onSearch && (
+            <Pressable
+              onPress={onSearch}
+              hitSlop={8}
+              accessibilityLabel="Search photos and videos"
+              className="h-10 w-10 items-center justify-center rounded-full active:opacity-70"
+              style={{ backgroundColor: colors.backgroundElement }}
+            >
+              <Icon name="search" size={20} color={colors.text} />
+            </Pressable>
+          )}
+          <SegmentedControl value={segment} onChange={setSegment} />
+        </View>
+      )}
     </View>
   );
 
   if (!granted && !checking) {
     return (
       <SafeAreaView className="flex-1" style={{ backgroundColor: colors.background }} edges={["top"]}>
-        {titleRow}
+        {titleRow()}
         <View className="flex-1 items-center justify-center gap-4 px-8">
           <Icon name="gallery" size={56} color={colors.textSecondary} />
           <ThemedText type="subtitle" className="text-center">
@@ -194,9 +215,15 @@ export default function GalleryScreen() {
   return (
     <SafeAreaView className="flex-1" style={{ backgroundColor: colors.background }} edges={["top"]}>
       {segment === "photos" ? (
-        <GalleryBrowser enabled={granted} loading={checking} renderHeader={() => titleRow} />
+        <GalleryBrowser
+          enabled={granted}
+          loading={checking}
+          bottomInset={tabBarInset}
+          swipeTo="/"
+          renderHeader={({ openSearch }) => titleRow(openSearch)}
+        />
       ) : (
-        <AlbumsView header={titleRow} />
+        <AlbumsView header={titleRow()} />
       )}
     </SafeAreaView>
   );

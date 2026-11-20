@@ -16,6 +16,8 @@ import { ConfirmSheet } from "@/components/confirm-sheet";
 import { FolderCard } from "@/components/folder-card";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
+import { useTabBarInset } from "@/components/gallery/tab-bar";
+import { TabSwipe } from "@/components/gallery/tab-swipe";
 import { usePrefetchGallery } from "@/hooks/use-gallery";
 import { useMediaPermissions } from "@/hooks/use-permissions";
 import { useSelection } from "@/hooks/use-selection";
@@ -30,6 +32,7 @@ export default function FoldersScreen() {
   const { granted, requestPermission } = useMediaPermissions();
   // Load the Gallery tab's data in the background so it opens instantly.
   usePrefetchGallery(granted);
+  const tabBarInset = useTabBarInset();
   const {
     data: folders,
     isLoading,
@@ -188,13 +191,17 @@ export default function FoldersScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top"]}>
+      {/* Swipe right-to-left to open Gallery. */}
+      <TabSwipe>
       <FlatList
         data={folders}
         keyExtractor={(item) => item.id}
         // Re-render cards when the selection changes so the checkmark updates.
         extraData={selection.selectedIds}
         ListHeaderComponent={header}
-        contentContainerClassName="gap-1.5 px-4 pb-8"
+        contentContainerClassName="gap-1.5 px-4"
+        // Keep the last folder above the floating tab bar.
+        contentContainerStyle={{ paddingBottom: 32 + tabBarInset }}
         renderItem={({ item }) => (
           <FolderCard
             folder={item}
@@ -235,6 +242,7 @@ export default function FoldersScreen() {
           )
         }
       />
+      </TabSwipe>
 
       <ConfirmSheet
         visible={confirmOpen}

@@ -48,10 +48,12 @@ export default function ViewerScreen() {
     id?: string;
     /** Its position in the grid, used only as a fallback. */
     index?: string;
+    /** Search the grid was showing, so swiping stays within the results. */
+    q?: string;
   }>();
   const albumId = params.albumId || undefined;
   const { items, hasNextPage, isFetchingNextPage, fetchNextPage } =
-    useGalleryItems(params.filter ?? "all", albumId);
+    useGalleryItems(params.filter ?? "all", albumId, true, 3, params.q ?? "");
 
   // Locate the tapped item by id so a list refresh can't open the wrong one.
   const [initialIndex] = useState(() => {

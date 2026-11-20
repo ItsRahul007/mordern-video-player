@@ -58,6 +58,7 @@ const ICONS = {
   gallery: { ios: 'photo.on.rectangle.angled', android: 'photo_library', web: 'photo_library' },
   albums: { ios: 'rectangle.stack.fill', android: 'photo_album', web: 'photo_album' },
   info: { ios: 'info.circle', android: 'info', web: 'info' },
+  search: { ios: 'magnifyingglass', android: 'search', web: 'search' },
 } as const;
 
 export type IconName = keyof typeof ICONS | keyof typeof BRAND_ICONS;
