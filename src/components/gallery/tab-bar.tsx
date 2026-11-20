@@ -1,18 +1,12 @@
-import { useEffect, type ComponentProps } from "react";
 import { Pressable, View } from "react-native";
-import Animated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-} from "react-native-reanimated";
+import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Icon, type IconName } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { useTheme } from "@/hooks/use-theme";
-import type { Tabs } from "expo-router";
+import { PAGER_TABS, useTabPager } from "@/components/gallery/tab-pager";
 
-type TabBarProps = Parameters<NonNullable<ComponentProps<typeof Tabs>["tabBar"]>>[0];
 
 const TAB_ICONS: Record<string, IconName> = {
   index: "home",
@@ -25,7 +19,6 @@ const SLOT = 124;
 const SLOT_H = 48;
 /** Padding between the dock's edge and the segment (dp). */
 const INSET = 5;
-const SPRING = { damping: 18, stiffness: 230, mass: 0.7 };
 /** Space above the dock (dp). */
 const DOCK_TOP = 8;
 
@@ -49,18 +42,17 @@ export function useTabBarInset(): number {
  * bottom edge, where the active tab is a solid accent segment (icon + label)
  * that springs across when you switch; inactive tabs are just a quiet icon.
  */
-export function AppTabBar({ state, descriptors, navigation }: TabBarProps) {
+export function AppTabBar() {
   const { colors, scheme } = useTheme();
   const insets = useSafeAreaInsets();
+  const { position, index: focusedIndex, goTo } = useTabPager();
   // Text/icons on the accent segment: white in both themes.
   const onAccent = "#FFFFFF";
 
-  const offset = useSharedValue(state.index * SLOT);
-  useEffect(() => {
-    offset.set(withSpring(state.index * SLOT, SPRING));
-  }, [state.index, offset]);
+  // The capsule tracks the pager position live — it slides with the finger
+  // during a swipe and springs with the pages on a tap.
   const segmentStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: offset.get() }],
+    transform: [{ translateX: position.get() * SLOT }],
   }));
 
   return (
@@ -105,46 +97,30 @@ export function AppTabBar({ state, descriptors, navigation }: TabBarProps) {
           ]}
         />
 
-        {state.routes.map((route, index) => {
-          const { options } = descriptors[route.key];
-          const label =
-            typeof options.tabBarLabel === "string"
-              ? options.tabBarLabel
-              : (options.title ?? route.name);
-          const focused = state.index === index;
-
-          const onPress = () => {
-            const event = navigation.emit({
-              type: "tabPress",
-              target: route.key,
-              canPreventDefault: true,
-            });
-            if (!focused && !event.defaultPrevented) {
-              navigation.navigate(route.name, route.params);
-            }
-          };
-
+        {PAGER_TABS.map((tab, index) => {
+          const focused = focusedIndex === index;
           return (
             <Pressable
-              key={route.key}
-              onPress={onPress}
-              onLongPress={() => navigation.emit({ type: "tabLongPress", target: route.key })}
+              key={tab.name}
+              onPress={() => {
+                if (!focused) goTo(index);
+              }}
               accessibilityRole="tab"
               accessibilityState={{ selected: focused }}
-              accessibilityLabel={label}
+              accessibilityLabel={tab.label}
               // Plain style object: NativeWind drops function styles when a
               // className is present, which collapsed the slots.
               style={{ width: SLOT, height: SLOT_H }}
               className="flex-row items-center justify-center gap-2 active:opacity-75"
             >
               <Icon
-                name={TAB_ICONS[route.name] ?? "home"}
+                name={TAB_ICONS[tab.name] ?? "home"}
                 size={22}
                 color={focused ? onAccent : colors.textSecondary}
               />
               {focused && (
                 <ThemedText className="text-[15px] font-semibold" style={{ color: onAccent }}>
-                  {label}
+                  {tab.label}
                 </ThemedText>
               )}
             </Pressable>

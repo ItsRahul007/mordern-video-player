@@ -13,6 +13,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AlbumCard } from "@/components/gallery/album-card";
 import { SkeletonBlock, useSkeletonClock } from "@/components/gallery/skeleton";
 import { useTabBarInset } from "@/components/gallery/tab-bar";
+import { TabSwipe } from "@/components/gallery/tab-swipe";
 import { GalleryBrowser } from "@/components/gallery/gallery-browser";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
@@ -123,6 +124,7 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
   return (
     <>
       {header}
+      <TabSwipe>
       <FlatList
         data={albums}
         keyExtractor={(a) => a.id}
@@ -149,6 +151,7 @@ function AlbumsView({ header }: { header: React.ReactNode }) {
           )
         }
       />
+      </TabSwipe>
     </>
   );
 }
@@ -216,6 +219,7 @@ export default function GalleryScreen() {
           enabled={granted}
           loading={checking}
           bottomInset={tabBarInset}
+          swipeTo="/"
           renderHeader={({ openSearch }) => titleRow(openSearch)}
         />
       ) : (

@@ -17,6 +17,7 @@ import { FolderCard } from "@/components/folder-card";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { useTabBarInset } from "@/components/gallery/tab-bar";
+import { TabSwipe } from "@/components/gallery/tab-swipe";
 import { usePrefetchGallery } from "@/hooks/use-gallery";
 import { useMediaPermissions } from "@/hooks/use-permissions";
 import { useSelection } from "@/hooks/use-selection";
@@ -190,6 +191,8 @@ export default function FoldersScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["top"]}>
+      {/* Swipe right-to-left to open Gallery. */}
+      <TabSwipe>
       <FlatList
         data={folders}
         keyExtractor={(item) => item.id}
@@ -239,6 +242,7 @@ export default function FoldersScreen() {
           )
         }
       />
+      </TabSwipe>
 
       <ConfirmSheet
         visible={confirmOpen}

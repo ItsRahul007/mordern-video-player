@@ -789,6 +789,18 @@ export function MediaGrid({
     scrollRef.current?.scrollTo({ y: 0, animated: false });
   }, [scrollResetKey, scrollRef]);
 
+  // Content band covered by mounted tiles (ends extend to the list edges).
+  const mask = useMemo(() => {
+    const total =
+      contentHeight + bottomInset + (isFetchingMore ? FOOTER_ROWS * (layout.tileSize + GAP) : 0);
+    const n = layout.y.length;
+    if (n === 0 || range[1] <= range[0]) return { top: 0, height: 0 };
+    const top = range[0] <= 0 ? 0 : layout.y[range[0]];
+    const bottom =
+      range[1] >= n ? total : layout.y[range[1] - 1] + layout.tileSize + GAP;
+    return { top, height: Math.max(0, bottom - top) };
+  }, [range, layout, contentHeight, bottomInset, isFetchingMore]);
+
   // How far drag-select auto-scroll may go.
   useEffect(() => {
     maxScroll.set(Math.max(0, contentHeight + bottomInset - viewportH));
@@ -840,6 +852,13 @@ export function MediaGrid({
   return (
     <GestureDetector gesture={gestures}>
       <View className="flex-1" onLayout={onLayout}>
+        <LoadingBackdrop
+          columns={layout.columns}
+          tileSize={layout.tileSize}
+          height={viewportH}
+          scrollY={scrollY}
+          color={colors.backgroundElement}
+        />
         <GestureDetector gesture={native}>
           <Animated.ScrollView
             ref={scrollRef}
@@ -867,6 +886,13 @@ export function MediaGrid({
                   (isFetchingMore ? FOOTER_ROWS * (layout.tileSize + GAP) : 0),
               }}
             >
+              {/* Opaque behind the mounted tiles, so the backdrop only shows
+                  where tiles haven't been created yet. */}
+              <View
+                pointerEvents="none"
+                className="absolute left-0 right-0"
+                style={{ top: mask.top, height: mask.height, backgroundColor: colors.background }}
+              />
               {activeLevels.map((l) => (
                 <LevelHeaders
                   key={`headers-${l}`}
@@ -1148,7 +1174,7 @@ const LevelHeaders = memo(function LevelHeaders({
           <View
             key={h.key}
             className="absolute left-0 right-0 flex-row items-center justify-between px-4"
-            style={{ top: h.y, height: GROUP_HEADER_HEIGHT }}
+            style={{ top: h.y, height: GROUP_HEADER_HEIGHT, backgroundColor: background }}
           >
             <ThemedText type="small" style={{ color: secondary }}>
               {h.title}
@@ -1287,3 +1313,43 @@ function GridSkeleton({
     </View>
   );
 }
+
+/**
+ * Gray tile cells behind the grid, aligned to the current columns and moved
+ * with the scroll (UI thread). During a fast fling the grid can outrun the
+ * tiles it creates; this keeps those gaps looking like loading tiles rather
+ * than black.
+ */
+const LoadingBackdrop = memo(function LoadingBackdrop({
+  columns,
+  tileSize,
+  height,
+  scrollY,
+  color,
+}: {
+  columns: number;
+  tileSize: number;
+  height: number;
+  scrollY: SharedValue<number>;
+  color: string;
+}) {
+  const rowH = tileSize + GAP;
+  const rows = Math.ceil(height / rowH) + 1;
+  const style = useAnimatedStyle(() => ({
+    transform: [{ translateY: -(((scrollY.get() % rowH) + rowH) % rowH) }],
+  }));
+  if (height <= 0) return null;
+  return (
+    <View pointerEvents="none" className="absolute inset-0 overflow-hidden">
+      <Animated.View style={style}>
+        {Array.from({ length: rows }, (_, r) => (
+          <View key={r} className="flex-row" style={{ gap: GAP, height: rowH }}>
+            {Array.from({ length: columns }, (_, c) => (
+              <View key={c} style={{ width: tileSize, height: tileSize, backgroundColor: color }} />
+            ))}
+          </View>
+        ))}
+      </Animated.View>
+    </View>
+  );
+});

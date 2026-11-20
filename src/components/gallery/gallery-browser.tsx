@@ -5,6 +5,7 @@ import { BackHandler, Keyboard, Platform, Pressable, ScrollView, TextInput, View
 
 import { ConfirmSheet } from "@/components/confirm-sheet";
 import { MediaGrid } from "@/components/gallery/media-grid";
+import { TabSwipe } from "@/components/gallery/tab-swipe";
 import { Icon } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { galleryKeys, useGalleryItems } from "@/hooks/use-gallery";
@@ -70,6 +71,8 @@ type GalleryBrowserProps = {
   loading?: boolean;
   /** Space to leave at the end of the grid (floating tab bar). */
   bottomInset?: number;
+  /** Swiping the grid left-to-right opens this tab (Gallery → Home). */
+  swipeTo?: "/";
   /** Normal (non-selection, non-search) header above the chips. */
   renderHeader: (actions: { openSearch: () => void }) => ReactNode;
   emptyText?: string;
@@ -84,6 +87,7 @@ export function GalleryBrowser({
   enabled,
   loading = false,
   bottomInset = 0,
+  swipeTo,
   renderHeader,
   emptyText = "No photos or videos here yet.",
 }: GalleryBrowserProps) {
@@ -184,6 +188,30 @@ export function GalleryBrowser({
     for (const item of items) if (!selection.isSelected(item.id)) toggle(item.id);
   };
 
+  const grid = (
+    <MediaGrid
+        items={items}
+        isLoading={isLoading || loading}
+        isRefreshing={isRefetching && !isFetchingNextPage}
+        isFetchingMore={isFetchingNextPage}
+        onRefresh={refetch}
+        onEndReached={() => {
+          if (hasNextPage && !isFetchingNextPage) void fetchNextPage();
+        }}
+        emptyText={
+          searchQuery.trim()
+            ? `Nothing matches “${searchQuery.trim()}”. Try a month, a year, “video” or part of a file name.`
+            : emptyText
+        }
+        selectedIds={selection.selectedIds}
+        onPressItem={onPressItem}
+        onSelectionChange={selection.replace}
+        onColumnsChange={setColumns}
+        scrollResetKey={`${filter}|${searchQuery}`}
+        bottomInset={bottomInset}
+      />
+  );
+
   const header = (
     <View style={{ backgroundColor: colors.background }}>
       {selection.active ? (
@@ -240,27 +268,14 @@ export function GalleryBrowser({
     <>
       {/* Header sits outside the list so it stays put while the grid scrolls. */}
       {header}
-      <MediaGrid
-        items={items}
-        isLoading={isLoading || loading}
-        isRefreshing={isRefetching && !isFetchingNextPage}
-        isFetchingMore={isFetchingNextPage}
-        onRefresh={refetch}
-        onEndReached={() => {
-          if (hasNextPage && !isFetchingNextPage) void fetchNextPage();
-        }}
-        emptyText={
-          searchQuery.trim()
-            ? `Nothing matches “${searchQuery.trim()}”. Try a month, a year, “video” or part of a file name.`
-            : emptyText
-        }
-        selectedIds={selection.selectedIds}
-        onPressItem={onPressItem}
-        onSelectionChange={selection.replace}
-        onColumnsChange={setColumns}
-        scrollResetKey={`${filter}|${searchQuery}`}
-        bottomInset={bottomInset}
-      />
+      {swipeTo ? (
+        // Swipe left-to-right on the grid to go back to Home.
+        <TabSwipe>
+          {grid}
+        </TabSwipe>
+      ) : (
+        grid
+      )}
       <ConfirmSheet
         visible={confirmOpen}
         title={`Delete ${selection.count} item${selection.count === 1 ? "" : "s"}?`}
