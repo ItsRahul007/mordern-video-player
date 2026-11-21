@@ -1,4 +1,5 @@
-import { Pressable, View } from "react-native";
+import { View } from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useState } from "react";
 import Animated, {
   interpolate,
@@ -11,8 +12,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Icon, type IconName } from "@/components/icon";
 import { ThemedText } from "@/components/themed-text";
 import { useTheme } from "@/hooks/use-theme";
-import { PAGER_TABS, useTabPager } from "@/components/gallery/tab-pager";
-
+import {
+  PAGER_TABS,
+  settlePager,
+  useTabPager,
+} from "@/components/gallery/tab-pager";
+import { scheduleOnRN } from "react-native-worklets";
 
 const TAB_ICONS: Record<string, IconName> = {
   index: "home",
@@ -51,7 +56,7 @@ export function useTabBarInset(): number {
 export function AppTabBar() {
   const { colors, scheme } = useTheme();
   const insets = useSafeAreaInsets();
-  const { position, index: focusedIndex, goTo } = useTabPager();
+  const { position, settling, index: focusedIndex, goTo } = useTabPager();
   // Text/icons on the accent segment: white in both themes.
   const onAccent = "#FFFFFF";
 
@@ -113,9 +118,8 @@ export function AppTabBar() {
             position={position}
             onAccent={onAccent}
             inactiveColor={colors.textSecondary}
-            onPress={() => {
-              if (focusedIndex !== index) goTo(index);
-            }}
+            settling={settling}
+            goTo={goTo}
           />
         ))}
       </View>
@@ -140,7 +144,8 @@ function DockTab({
   position,
   onAccent,
   inactiveColor,
-  onPress,
+  settling,
+  goTo,
 }: {
   index: number;
   label: string;
@@ -149,8 +154,20 @@ function DockTab({
   position: SharedValue<number>;
   onAccent: string;
   inactiveColor: string;
-  onPress: () => void;
+  settling: SharedValue<number>;
+  goTo: (index: number, animate?: boolean) => void;
 }) {
+  // Tap handled on the UI thread: the slide starts on the very frame of the
+  // tap even if JavaScript is busy (e.g. the Gallery building its grid in
+  // the background); the route change follows on the JS thread.
+  const tap = Gesture.Tap()
+    .maxDistance(12)
+    .onEnd((_e, success) => {
+      if (!success || Math.round(position.get()) === index) return;
+      settling.set(index);
+      position.set(settlePager(position.get(), index));
+      scheduleOnRN(goTo, index, false);
+    });
   // Natural label width, measured once from an invisible copy.
   const labelW = useSharedValue(0);
   const [measured, setMeasured] = useState<number | null>(null);
@@ -179,55 +196,61 @@ function DockTab({
   }));
 
   return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="tab"
-      accessibilityState={{ selected: focused }}
-      accessibilityLabel={label}
-      // Plain style object: NativeWind drops function styles when a
-      // className is present, which collapsed the slots.
-      style={{ width: SLOT, height: SLOT_H }}
-      className="flex-row items-center justify-center active:opacity-75"
-    >
-      {/* Two stacked icons crossfade (tint colour itself can't animate). */}
-      <Animated.View style={iconScale}>
-        <Animated.View style={grayIcon}>
-          <Icon name={icon} size={22} color={inactiveColor} />
+    <GestureDetector gesture={tap}>
+      <View
+        accessible
+        accessibilityRole="tab"
+        accessibilityState={{ selected: focused }}
+        accessibilityLabel={label}
+        // Screen readers activate via this action (they don't send touches).
+        accessibilityActions={[{ name: "activate" }]}
+        onAccessibilityAction={() => {
+          if (!focused) goTo(index);
+        }}
+        collapsable={false}
+        style={{ width: SLOT, height: SLOT_H }}
+        className="flex-row items-center justify-center"
+      >
+        {/* Two stacked icons crossfade (tint colour itself can't animate). */}
+        <Animated.View style={iconScale}>
+          <Animated.View style={grayIcon}>
+            <Icon name={icon} size={22} color={inactiveColor} />
+          </Animated.View>
+          <Animated.View className="absolute inset-0" style={whiteIcon}>
+            <Icon name={icon} size={22} color={onAccent} />
+          </Animated.View>
         </Animated.View>
-        <Animated.View className="absolute inset-0" style={whiteIcon}>
-          <Icon name={icon} size={22} color={onAccent} />
-        </Animated.View>
-      </Animated.View>
 
-      <Animated.View className="overflow-hidden" style={labelStyle}>
-        {/* Fixed at its natural width: the container clips it while
+        <Animated.View className="overflow-hidden" style={labelStyle}>
+          {/* Fixed at its natural width: the container clips it while
             collapsing, so it slides away instead of truncating to "Ho…". */}
-        <ThemedText
-          numberOfLines={1}
-          ellipsizeMode="clip"
-          className="text-[15px] font-semibold"
-          // A little slack over the measured width so it never wraps.
-          style={{ color: onAccent, width: (measured ?? 196) + 4 }}
-        >
-          {label}
-        </ThemedText>
-      </Animated.View>
-
-      {/* Invisible copy, only to measure the label's natural width. */}
-      {measured == null && (
-        <View className="absolute opacity-0" pointerEvents="none">
           <ThemedText
+            numberOfLines={1}
+            ellipsizeMode="clip"
             className="text-[15px] font-semibold"
-            onLayout={(e) => {
-              const w = Math.ceil(e.nativeEvent.layout.width) + 4;
-              labelW.set(w);
-              setMeasured(w);
-            }}
+            // A little slack over the measured width so it never wraps.
+            style={{ color: onAccent, width: (measured ?? 196) + 4 }}
           >
             {label}
           </ThemedText>
-        </View>
-      )}
-    </Pressable>
+        </Animated.View>
+
+        {/* Invisible copy, only to measure the label's natural width. */}
+        {measured == null && (
+          <View className="absolute opacity-0" pointerEvents="none">
+            <ThemedText
+              className="text-[15px] font-semibold"
+              onLayout={(e) => {
+                const w = Math.ceil(e.nativeEvent.layout.width) + 4;
+                labelW.set(w);
+                setMeasured(w);
+              }}
+            >
+              {label}
+            </ThemedText>
+          </View>
+        )}
+      </View>
+    </GestureDetector>
   );
 }

@@ -52,7 +52,7 @@ export function TabSwipe({ children }: { children: ReactNode }) {
       target = Math.max(0, Math.min(LAST, target));
       if (target !== from) settling.set(target);
       position.set(settlePager(position.get(), target));
-      if (target !== from) scheduleOnRN(goTo, target);
+      if (target !== from) scheduleOnRN(goTo, target, false);
     })
     .onFinalize((_e, success) => {
       // Only a swipe that really started may move the pager here. Taps and

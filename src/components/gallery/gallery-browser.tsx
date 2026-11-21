@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { useCallback, useDeferredValue, useMemo, useState, type ReactNode } from "react";
 import { BackHandler, Keyboard, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
 
@@ -103,6 +103,8 @@ export function GalleryBrowser({
   // Filter on a deferred copy so typing stays instant on big libraries.
   const searchQuery = useDeferredValue(searchOpen ? query : "");
   const selection = useSelection();
+  // The Gallery tab is pre-built off-screen; keep its grid light until shown.
+  const screenFocused = useIsFocused();
   const {
     items,
     allItems,
@@ -209,6 +211,7 @@ export function GalleryBrowser({
         onColumnsChange={setColumns}
         scrollResetKey={`${filter}|${searchQuery}`}
         bottomInset={bottomInset}
+        visible={screenFocused}
       />
   );
 

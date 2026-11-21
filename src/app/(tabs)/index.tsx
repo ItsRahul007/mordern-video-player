@@ -29,7 +29,10 @@ export default function FoldersScreen() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { colors } = useTheme();
-  const { granted, requestPermission } = useMediaPermissions();
+  const { permission, granted, requestPermission } = useMediaPermissions();
+  // Right after launch the permission is still being checked — that's
+  // loading, not "denied", so show the loader instead of the grant screen.
+  const checking = permission == null;
   // Load the Gallery tab's data in the background so it opens instantly.
   usePrefetchGallery(granted);
   const tabBarInset = useTabBarInset();
@@ -163,7 +166,7 @@ export default function FoldersScreen() {
     </View>
   );
 
-  if (!granted) {
+  if (!granted && !checking) {
     return (
       <SafeAreaView className="flex-1 bg-background" edges={["top"]}>
         {header}
@@ -228,7 +231,7 @@ export default function FoldersScreen() {
           />
         }
         ListEmptyComponent={
-          isLoading ? (
+          isLoading || checking ? (
             <View className="mt-24 items-center">
               <ActivityIndicator color={colors.textSecondary} />
             </View>

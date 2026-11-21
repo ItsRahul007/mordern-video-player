@@ -72,6 +72,9 @@ const AUTO_SCROLL_SPEED = 18;
 /** While drag-selecting, React's selection state is synced at most this often (ms). */
 const DRAG_SYNC_MS = 80;
 
+/** Visible this long before neighbouring zoom levels are pre-mounted (ms). */
+const NEIGHBOUR_WARM_MS = 900;
+
 /** Release past this much of a transition completes it; otherwise it springs back. */
 const COMMIT_AT = 0.4;
 const SETTLE_MS = 200;
@@ -206,6 +209,12 @@ type MediaGridProps = {
   scrollResetKey?: string;
   /** Extra space at the end of the grid (e.g. under a floating tab bar). */
   bottomInset?: number;
+  /**
+   * Whether the grid's screen is showing. While it isn't (e.g. the Gallery
+   * tab pre-built in the background), only the current zoom level is mounted;
+   * neighbouring levels for pinch are added once it's been visible a moment.
+   */
+  visible?: boolean;
 };
 
 /**
@@ -229,6 +238,7 @@ export function MediaGrid({
   onColumnsChange,
   scrollResetKey,
   bottomInset = 0,
+  visible = true,
 }: MediaGridProps) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
@@ -274,7 +284,14 @@ export function MediaGrid({
   // the mounted tile index range.
   // Neighbouring levels are kept mounted at rest (invisible) so a pinch
   // never has to build anything when it starts.
-  const [activeLevels, setActiveLevels] = useState<number[]>(() => withNeighbours(0));
+  const [activeLevels, setActiveLevels] = useState<number[]>([0]);
+  // Pre-mount the neighbouring zoom levels (for an instant pinch) only after
+  // the grid has been on screen briefly — never as background start-up work.
+  const [neighboursReady, setNeighboursReady] = useState(false);
+  const levelsFor = useCallback(
+    (lvl: number) => (neighboursReady ? withNeighbours(lvl) : [lvl]),
+    [neighboursReady],
+  );
   // Start with roughly the first screen and a half mounted.
   const [range, setRange] = useState<[number, number]>(() => rangeFor(layouts[0], 0, 1400));
   const [pinching, setPinching] = useState(false);
@@ -311,14 +328,14 @@ export function MediaGrid({
    * same spot — so the tiles a pinch needs are already there when it starts.
    */
   const restingRange = useCallback(
-    (lvl: number): [number, number] => {
+    (lvl: number, includeNeighbours = neighboursReady): [number, number] => {
       const h = viewHeight.get() || 900;
       const top = scrollY.get();
       const lay = layouts[lvl];
       const buf = h * bufferFor(lay.columns);
       let [start, end] = rangeFor(lay, top - buf, top + h + buf);
       const centre = Math.min(lowerBound(lay.y, top + h / 2), Math.max(0, lay.y.length - 1));
-      for (const n of withNeighbours(lvl)) {
+      for (const n of includeNeighbours ? withNeighbours(lvl) : [lvl]) {
         if (n === lvl) continue;
         const nl = layouts[n];
         if (nl.y[centre] === undefined) continue;
@@ -329,8 +346,21 @@ export function MediaGrid({
       }
       return [Math.min(start, end), end];
     },
-    [layouts, scrollY, viewHeight],
+    [layouts, scrollY, viewHeight, neighboursReady],
   );
+
+  // Once visible for a moment, add the neighbouring levels around the
+  // current spot (state is set from the timer callback, not the effect body).
+  useEffect(() => {
+    if (!visible || neighboursReady) return;
+    const t = setTimeout(() => {
+      setNeighboursReady(true);
+      if (pinching) return; // the pinch mounts what it needs itself
+      setActiveLevels(withNeighbours(level));
+      setRange(restingRange(level, true));
+    }, NEIGHBOUR_WARM_MS);
+    return () => clearTimeout(t);
+  }, [visible, neighboursReady, pinching, level, restingRange]);
 
   const refreshRestingRange = useCallback(() => {
     const next = restingRange(level);
@@ -356,6 +386,7 @@ export function MediaGrid({
   const beginTransition = useCallback(
     (anchor: number, screenY: number, rel: number) => {
       setPinching(true);
+      setActiveLevels((prev) => Array.from(new Set([...prev, ...withNeighbours(level)])));
       // Usually already covered by the resting range; only grow if needed
       // (never shrink mid-gesture — that would unmount visible tiles).
       const [s, e] = computeRange(withNeighbours(level), anchor, screenY, rel);
@@ -390,10 +421,10 @@ export function MediaGrid({
       scrollLocked.set(false);
       setLevel(finalLevel);
       onColumnsChange?.(GRID_ZOOM_LEVELS[finalLevel]);
-      setActiveLevels(withNeighbours(finalLevel));
+      setActiveLevels(levelsFor(finalLevel));
       setRange(restingRange(finalLevel));
     },
-    [restingRange, scrollLocked, onColumnsChange],
+    [restingRange, scrollLocked, onColumnsChange, levelsFor],
   );
 
   // Keep the anchor tile under the fingers as the layout changes.
@@ -783,6 +814,7 @@ export function MediaGrid({
     () => ({ live: dragLive, anchor: dragAnchor, to: dragLast, select: dragSelects }),
     [dragLive, dragAnchor, dragLast, dragSelects],
   );
+
 
   // A different list (search / filter): start from the top.
   useEffect(() => {

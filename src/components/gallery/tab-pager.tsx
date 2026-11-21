@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PropsWithChildren,
 } from "react";
@@ -51,7 +52,8 @@ type PagerContextValue = {
   width: number;
   /** Mount every tab, even ones never opened (set shortly after start-up). */
   warm: boolean;
-  goTo: (index: number) => void;
+  /** Switch tab; `animate: false` when the caller already animated (swipe). */
+  goTo: (index: number, animate?: boolean) => void;
 };
 
 const PagerContext = createContext<PagerContextValue | null>(null);
@@ -88,11 +90,17 @@ export function TabPagerProvider({ children }: PropsWithChildren) {
 
   const position = useSharedValue(index);
   const settling = useSharedValue(-1);
+  /** Tab a dock tap is already animating to (see goTo). */
+  const tapTarget = useRef(-1);
 
   // Route changed (dock tap, swipe, deep link): glide to that page — unless
   // a swipe is already springing there.
   useEffect(() => {
-    if (settling.get() === index) {
+    // Already sliding there: a dock tap (JS-side flag — a shared value
+    // written from JS isn't reliably readable back from JS right away) or
+    // a swipe (set on the UI thread).
+    if (tapTarget.current === index || settling.get() === index) {
+      tapTarget.current = -1;
       settling.set(-1);
       return;
     }
@@ -106,11 +114,18 @@ export function TabPagerProvider({ children }: PropsWithChildren) {
   }, []);
 
   const goTo = useCallback(
-    (i: number) => {
-      const tab = PAGER_TABS[Math.max(0, Math.min(LAST, i))];
-      router.navigate(tab.href);
+    (i: number, animate = true) => {
+      const target = Math.max(0, Math.min(LAST, i));
+      if (animate) {
+        tapTarget.current = target;
+        // Start the slide on the UI thread *before* switching the route: the
+        // route change re-renders the tabs (and the Gallery may be busy
+        // building its grid), and the animation shouldn't wait for that.
+        position.set(settlePager(position.get(), target));
+      }
+      router.navigate(PAGER_TABS[target].href);
     },
-    [router],
+    [router, position],
   );
 
   const value = useMemo(
